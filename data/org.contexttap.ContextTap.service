@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.contexttap.ContextTap
+Exec=/home/gbreland/Projects/TermAI/context-tap/bin/context-tap

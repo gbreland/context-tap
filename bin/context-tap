@@ -1,0 +1,2 @@
+#!/bin/sh
+exec gjs -m /home/gbreland/Projects/TermAI/context-tap/src/main.js "$@"

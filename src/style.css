@@ -1,0 +1,132 @@
+.monospace {
+  font-family: monospace;
+}
+
+textview.chat-input,
+textview.chat-input > text {
+  background-color: color-mix(in srgb, @accent_bg_color 16%, @card_bg_color);
+}
+
+.user-message {
+  background: alpha(@accent_bg_color, 0.18);
+  border-radius: 12px;
+  padding: 8px;
+}
+
+.assistant-message {
+  padding: 4px;
+}
+
+.md-code {
+  background: alpha(@window_fg_color, 0.08);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.md-quote {
+  padding: 2px 8px;
+  border-left: 3px solid alpha(@window_fg_color, 0.35);
+}
+
+.integration-basic {
+  color: alpha(@window_fg_color, 0.55);
+}
+
+.integration-native {
+  color: #33d17a;
+}
+
+.integration-tmux {
+  color: #62a0ea;
+}
+
+.pin-on {
+  color: @accent_color;
+}
+
+.error-bar {
+  background: alpha(@error_color, 0.16);
+  border-radius: 12px;
+}
+
+.error-text {
+  padding: 6px 0;
+}
+
+.data-preview {
+  background: alpha(@window_fg_color, 0.08);
+  border-radius: 8px;
+}
+
+textview.data-preview,
+textview.data-preview > text {
+  font-family: monospace;
+  background: transparent;
+}
+
+.context-panel {
+  background: @card_bg_color;
+  border-radius: 12px;
+  padding: 8px;
+}
+
+.context-badge-new {
+  color: @accent_color;
+  font-weight: bold;
+}
+
+.context-title {
+  font-size: 1.45em;
+  font-weight: bold;
+}
+
+.style-circle {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 16px;
+}
+
+.style-follow {
+  background: linear-gradient(to right, #3d3d3d 50%, #f6f5f4 50%);
+  color: #b0b0b0;
+}
+
+.style-follow image {
+  color: #b0b0b0;
+}
+
+.style-light {
+  background: #f6f5f4;
+  color: #1e1e1e;
+}
+
+.style-dark {
+  background: #2b2b2b;
+  color: #f6f5f4;
+}
+
+.style-circle:checked {
+  outline: 2px solid @accent_bg_color;
+  outline-offset: 2px;
+}
+
+button.context-button.suggested-action:not(:checked) {
+  background-image: image(RGB(0 0 6/15%));
+}
+
+button.context-button.suggested-action:not(:checked):hover {
+  background-image: image(RGB(0 0 6/5%));
+}
+
+button.context-button.suggested-action:not(:checked):active {
+  background-image: image(RGB(0 0 6/30%));
+}
+
+.context-split > separator {
+  min-height: 10px;
+  margin-top: 4px;
+  margin-bottom: 4px;
+  background: alpha(@window_fg_color, 0.28);
+  border-radius: 4px;
+}
