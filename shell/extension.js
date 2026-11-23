@@ -135,6 +135,7 @@ function savePlacement(mode, above) {
 export default class GnomeAiAssistantExtension extends Extension {
     enable() {
         this._shots = new Map();
+        this._shotBusy = false;
         const saved = loadPlacement();
         this._mode = saved.mode;
         this._above = saved.above;
@@ -525,6 +526,7 @@ export default class GnomeAiAssistantExtension extends Extension {
     }
 
     _captureAfterRaise(metaWindow, done) {
+        this._shotEpoch = (this._shotEpoch || 0) + 1;
         this._cancelRaiseCapture();
         let finished = false;
         let restackId = 0;
@@ -682,47 +684,125 @@ export default class GnomeAiAssistantExtension extends Extension {
         return this._pngBytes(pixels, width, height, stride);
     }
 
+    _captureSize(rect) {
+        let width = Math.max(1, Math.round(rect.width));
+        let height = Math.max(1, Math.round(rect.height));
+        let scale = 1;
+        try {
+            const sized = global.stage.get_capture_final_size(rect);
+            if (Array.isArray(sized)) {
+                if (sized.length >= 4 && sized[1] > 0 && sized[2] > 0) {
+                    width = sized[1];
+                    height = sized[2];
+                    scale = sized[3] > 0 ? sized[3] : 1;
+                } else if (sized.length >= 3 && sized[0] > 0 && sized[1] > 0) {
+                    width = sized[0];
+                    height = sized[1];
+                    scale = sized[2] > 0 ? sized[2] : 1;
+                }
+            }
+        } catch {
+            /* Use the window size. */
+        }
+        return {width, height, scale};
+    }
+
+    _toRgba(pixels, premultiplied) {
+        for (let i = 0; i < pixels.length; i += 4) {
+            const blue = pixels[i];
+            const green = pixels[i + 1];
+            const red = pixels[i + 2];
+            const alpha = pixels[i + 3];
+            if (!premultiplied || alpha === 0 || alpha === 255) {
+                pixels[i] = red;
+                pixels[i + 1] = green;
+                pixels[i + 2] = blue;
+                continue;
+            }
+            pixels[i] = Math.min(255, Math.round(red * 255 / alpha));
+            pixels[i + 1] = Math.min(255, Math.round(green * 255 / alpha));
+            pixels[i + 2] = Math.min(255, Math.round(blue * 255 / alpha));
+        }
+    }
+
     _pngStage(metaWindow) {
         const rect = metaWindow.get_frame_rect();
         if (!rect || rect.width < 1 || rect.height < 1)
             return null;
-        const stage = global.stage;
-        let width = rect.width;
-        let height = rect.height;
-        let scale = 1;
-        const sized = stage.get_capture_final_size(rect);
-        if (Array.isArray(sized)) {
-            if (sized[0] === false)
-                return null;
-            if (sized.length >= 4) {
-                width = sized[1];
-                height = sized[2];
-                scale = sized[3];
-            } else if (sized.length >= 3) {
-                width = sized[0];
-                height = sized[1];
-                scale = sized[2];
-            }
-        }
-        width = Math.max(1, Math.round(width));
-        height = Math.max(1, Math.round(height));
+        const {width, height, scale} = this._captureSize(rect);
         const stride = width * 4;
-        const pixels = new Uint8Array(stride * height);
-        const painted = stage.paint_to_buffer(
-            rect,
-            scale,
-            pixels,
-            stride,
-            Cogl.PixelFormat.RGBA_8888,
-            null,
-            Clutter.PaintFlag.NO_CURSORS);
-        if (!painted || !hasInk(pixels))
-            return null;
-        return this._pngBytes(pixels, width, height, stride);
+        const formats = [
+            [Cogl.PixelFormat.BGRA_8888, false],
+            [Cogl.PixelFormat.BGRA_8888_PRE, true],
+            [Cogl.PixelFormat.RGBA_8888, null],
+        ];
+        for (const [format, premultiplied] of formats) {
+            const pixels = new Uint8Array(stride * height);
+            let painted = false;
+            try {
+                painted = global.stage.paint_to_buffer(
+                    rect,
+                    scale,
+                    pixels,
+                    stride,
+                    format,
+                    null,
+                    Clutter.PaintFlag.NO_CURSORS);
+            } catch {
+                continue;
+            }
+            if (!painted || !hasInk(pixels))
+                continue;
+            if (premultiplied !== null)
+                this._toRgba(pixels, premultiplied);
+            const png = this._pngBytes(pixels, width, height, stride);
+            if (png?.length)
+                return png;
+        }
+        return null;
     }
 
-    _pngAsync(metaWindow, done) {
-        const rect = metaWindow.get_frame_rect();
+    _pngContent(content, rect) {
+        const texture = content?.get_texture?.();
+        if (!texture)
+            return null;
+        const texW = texture.get_width();
+        const texH = texture.get_height();
+        if (texW < 1 || texH < 1)
+            return null;
+        const stride = texW * 4;
+        const pixels = new Uint8Array(stride * texH);
+        if (!texture.get_data(Cogl.PixelFormat.RGBA_8888, stride, pixels))
+            return null;
+        const [stageW, stageH] = global.stage.get_size();
+        const scaleX = stageW > 0 ? texW / stageW : 1;
+        const scaleY = stageH > 0 ? texH / stageH : 1;
+        const x = Math.max(0, Math.min(texW - 1, Math.round(rect.x * scaleX)));
+        const y = Math.max(0, Math.min(texH - 1, Math.round(rect.y * scaleY)));
+        const width = Math.max(1, Math.min(texW - x, Math.round(rect.width * scaleX)));
+        const height = Math.max(1, Math.min(texH - y, Math.round(rect.height * scaleY)));
+        const outStride = width * 4;
+        const out = new Uint8Array(outStride * height);
+        for (let row = 0; row < height; row++) {
+            const src = (y + row) * stride + x * 4;
+            out.set(pixels.subarray(src, src + outStride), row * outStride);
+        }
+        if (!hasInk(out))
+            return null;
+        return this._pngBytes(out, width, height, outStride);
+    }
+
+    _pngAsync(metaWindow, done, epoch = this._shotEpoch, attempt = 0) {
+        if (epoch !== this._shotEpoch)
+            return;
+        const rect = metaWindow.get_frame_rect?.();
+        if ((this._holding || this._placing) && attempt < 10) {
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+                this._pngAsync(metaWindow, done, epoch, attempt + 1);
+                return GLib.SOURCE_REMOVE;
+            });
+            return;
+        }
         if (!rect || rect.width < 1 || rect.height < 1) {
             done();
             return;
@@ -732,8 +812,10 @@ export default class GnomeAiAssistantExtension extends Extension {
         try {
             shot.screenshot_area(
                 rect.x, rect.y, rect.width, rect.height, stream, (obj, result) => {
+                    if (epoch !== this._shotEpoch)
+                        return;
                     try {
-                        shot.screenshot_area_finish(result);
+                        obj.screenshot_area_finish(result);
                         stream.close(null);
                         const png = stream.steal_as_bytes()?.toArray?.() ?? null;
                         if (png?.length)
@@ -757,12 +839,7 @@ export default class GnomeAiAssistantExtension extends Extension {
         } catch (error) {
             console.error(`Context Tap window capture failed: ${error}`);
         }
-        try {
-            return this._pngStage(metaWindow);
-        } catch (error) {
-            console.error(`Context Tap stage capture failed: ${error}`);
-            return null;
-        }
+        return null;
     }
 
     _schedulePlacement() {
@@ -787,6 +864,7 @@ export default class GnomeAiAssistantExtension extends Extension {
     }
 
     _applyPlacement(restoreSize = false) {
+        this._placing = true;
         let found = false;
         for (const win of this._assistantWindows()) {
             found = true;
@@ -834,6 +912,7 @@ export default class GnomeAiAssistantExtension extends Extension {
             this._dockedRect = null;
             this._clearStrut();
         }
+        this._placing = false;
         return found;
     }
 
