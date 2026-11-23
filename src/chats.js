@@ -18,12 +18,26 @@ export function emptyIndex() {
     return {openId: '', skipLegacy: false, chats: []};
 }
 
+function tokenCount(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0)
+        return null;
+    return Math.round(number);
+}
+
 function turnRow(turn) {
     const elapsed = Number(turn?.elapsedMs);
-    return {
+    const row = {
         sentAt: Number(turn?.sentAt) || 0,
         elapsedMs: Number.isFinite(elapsed) ? elapsed : null,
     };
+    const input = tokenCount(turn?.inputTokens);
+    const output = tokenCount(turn?.outputTokens);
+    if (input != null)
+        row.inputTokens = input;
+    if (output != null)
+        row.outputTokens = output;
+    return row;
 }
 
 export function normalizeIndex(data) {
@@ -82,7 +96,12 @@ export function turnsFrom(messages) {
         const assistant = messages[i + 1];
         if (user?.role !== 'user' || assistant?.role !== 'assistant' || !assistant.text)
             break;
-        turns.push(turnRow({sentAt: user.sentAt, elapsedMs: assistant.elapsedMs}));
+        turns.push(turnRow({
+            sentAt: user.sentAt,
+            elapsedMs: assistant.elapsedMs,
+            inputTokens: user.inputTokens,
+            outputTokens: assistant.outputTokens,
+        }));
     }
     return turns;
 }
@@ -93,14 +112,21 @@ export function zipMessages(items, turns) {
     for (const item of items ?? []) {
         if (item?.role === 'user') {
             const sentAt = Number(turns?.[turn]?.sentAt) || 0;
-            messages.push(sentAt
-                ? {role: 'user', text: item.text ?? '', sentAt}
-                : {role: 'user', text: item.text ?? ''});
+            const message = {role: 'user', text: item.text ?? ''};
+            if (sentAt)
+                message.sentAt = sentAt;
+            const input = tokenCount(turns?.[turn]?.inputTokens);
+            if (input != null)
+                message.inputTokens = input;
+            messages.push(message);
         } else if (item?.role === 'assistant') {
             const elapsed = Number(turns?.[turn]?.elapsedMs);
             const message = {role: 'assistant', text: item.text ?? ''};
             if (Number.isFinite(elapsed))
                 message.elapsedMs = elapsed;
+            const output = tokenCount(turns?.[turn]?.outputTokens);
+            if (output != null)
+                message.outputTokens = output;
             messages.push(message);
             turn += 1;
         }

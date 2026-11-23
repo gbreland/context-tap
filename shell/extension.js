@@ -43,6 +43,9 @@ const XML = `
     <method name="FocusApp">
       <arg type="s" name="app_id" direction="in"/>
     </method>
+    <method name="SetWidth">
+      <arg type="i" name="width" direction="in"/>
+    </method>
     <signal name="FocusChanged">
       <arg type="s" name="app_id"/>
       <arg type="s" name="title"/>
@@ -76,6 +79,11 @@ function storedWidth() {
             GLib.get_user_data_dir(), 'context-tap', 'layout.json']);
         const [, bytes] = Gio.File.new_for_path(path).load_contents(null);
         const data = JSON.parse(new TextDecoder().decode(bytes));
+        if (data.contextOpen === true) {
+            const settingsWidth = Math.round(Number(data.contextWidth));
+            if (settingsWidth >= 1)
+                return settingsWidth;
+        }
         const width = Math.round(Number(data.width));
         return width >= 1 ? width : 0;
     } catch {
@@ -86,8 +94,8 @@ function storedWidth() {
 function chosenWidth(win, area) {
     const saved = storedWidth();
     const current = win.get_frame_rect()?.width || 0;
-    const width = saved || current || 1;
-    return Math.min(Math.max(width, 1), Math.max(1, area.width));
+    const width = saved || current || 210;
+    return Math.min(Math.max(width, 210), Math.max(210, area.width));
 }
 
 function placementFile() {
@@ -132,6 +140,11 @@ export default class GnomeAiAssistantExtension extends Extension {
         this._placeIdle = 0;
         this._placeTries = 0;
         this._current = global.display.focus_window;
+        this._framed = new Set();
+        this._frameIds = new Map();
+        this._framePending = new Set();
+        for (const actor of global.get_window_actors())
+            this._framed.add(actor);
         console.error('Context Tap extension ready');
         this._nameId = Gio.bus_own_name(
             Gio.BusType.SESSION,
@@ -141,16 +154,37 @@ export default class GnomeAiAssistantExtension extends Extension {
             null,
             null);
         this._focusId = global.display.connect('notify::focus-window', () => this._onFocus());
-        this._createdId = global.display.connect('window-created', () => this._schedulePlacement());
+        this._createdId = global.display.connect('window-created', (_display, win) => {
+            if (this._isAssistant(win))
+                this._schedulePlacement();
+            this._armFirstFrame(win);
+        });
+        this._grabId = global.display.connect('grab-op-end', (_display, win) => {
+            if (this._isAssistant(win))
+                this._releaseIfMoved(win, true);
+        });
         this._schedulePlacement();
     }
 
     disable() {
+        this._cancelRaiseCapture();
+        if (this._frameIds) {
+            for (const [actor, id] of this._frameIds) {
+                try {
+                    actor.disconnect(id);
+                } catch {
+                    /* The actor is already gone. */
+                }
+            }
+            this._frameIds.clear();
+        }
         if (this._focusId)
             global.display.disconnect(this._focusId);
         if (this._createdId)
             global.display.disconnect(this._createdId);
-        this._focusId = this._createdId = 0;
+        if (this._grabId)
+            global.display.disconnect(this._grabId);
+        this._focusId = this._createdId = this._grabId = 0;
         if (this._placeIdle) {
             GLib.source_remove(this._placeIdle);
             this._placeIdle = 0;
@@ -232,6 +266,9 @@ export default class GnomeAiAssistantExtension extends Extension {
             } else if (method === 'FocusApp') {
                 this._focusApp(params.deepUnpack()[0]);
                 invocation.return_value(new GLib.Variant('()', []));
+            } else if (method === 'SetWidth') {
+                this._setWidth(params.deepUnpack()[0]);
+                invocation.return_value(new GLib.Variant('()', []));
             } else {
                 invocation.return_error_literal(
                     'org.freedesktop.DBus.Error.UnknownMethod', method);
@@ -299,10 +336,16 @@ export default class GnomeAiAssistantExtension extends Extension {
             .filter(win => win && !win.is_skip_taskbar());
     }
 
+    _isAssistant(win) {
+        return Boolean(win)
+            && win.get_window_type() === Meta.WindowType.NORMAL
+            && this._describe(win).appId === ASSISTANT;
+    }
+
     _assistantWindows() {
         return global.get_window_actors()
             .map(actor => actor.meta_window)
-            .filter(win => win && this._describe(win).appId === ASSISTANT);
+            .filter(win => this._isAssistant(win));
     }
 
     _leaveOverview(win) {
@@ -343,13 +386,165 @@ export default class GnomeAiAssistantExtension extends Extension {
             finish();
             return;
         }
-        const png = this._png(target);
-        if (png?.length) {
-            this._keep(target, png);
-            finish();
+        this._captureAfterRaise(target, finish);
+    }
+
+    _overlaps(a, b) {
+        return a.x < b.x + b.width
+            && a.x + a.width > b.x
+            && a.y < b.y + b.height
+            && a.y + a.height > b.y;
+    }
+
+    _isOnTop(metaWindow) {
+        const target = metaWindow?.get_frame_rect?.();
+        if (!target || target.width < 1 || target.height < 1)
+            return false;
+        const actors = global.get_window_actors();
+        for (let i = actors.length - 1; i >= 0; i--) {
+            const actor = actors[i];
+            const win = actor.meta_window;
+            if (!win || win.minimized)
+                continue;
+            if (win.showing_on_its_workspace && !win.showing_on_its_workspace())
+                continue;
+            if (this._describe(win).appId === ASSISTANT)
+                continue;
+            if (actor.visible === false)
+                continue;
+            const rect = win.get_frame_rect();
+            if (!rect || !this._overlaps(target, rect))
+                continue;
+            return win === metaWindow;
+        }
+        return false;
+    }
+
+    _armFirstFrame(metaWindow) {
+        const actor = metaWindow?.get_compositor_private?.();
+        if (!actor) {
+            if (!this._framePending)
+                this._framePending = new Set();
+            if (this._framePending.has(metaWindow))
+                return;
+            this._framePending.add(metaWindow);
+            GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                this._framePending.delete(metaWindow);
+                this._armFirstFrame(metaWindow);
+                return GLib.SOURCE_REMOVE;
+            });
             return;
         }
-        this._pngAsync(target, finish);
+        if (this._framed.has(actor) || this._frameIds.has(actor))
+            return;
+        let id = 0;
+        try {
+            id = actor.connect('first-frame', () => {
+                if (this._frameIds.get(actor) === id)
+                    this._frameIds.delete(actor);
+                try {
+                    actor.disconnect(id);
+                } catch {
+                    /* Already disconnected. */
+                }
+                this._framed.add(actor);
+                if (this._raiseCapture?.window === metaWindow)
+                    this._raiseCapture.consider();
+            });
+        } catch (error) {
+            console.error(`Context Tap could not watch the first frame: ${error}`);
+            this._framed.add(actor);
+            return;
+        }
+        this._frameIds.set(actor, id);
+    }
+
+    _hasFrame(metaWindow) {
+        const actor = metaWindow?.get_compositor_private?.();
+        return Boolean(actor && this._framed.has(actor));
+    }
+
+    _cancelRaiseCapture() {
+        this._raiseCapture?.cleanup();
+        this._raiseCapture = null;
+    }
+
+    _captureAfterRaise(metaWindow, done) {
+        this._cancelRaiseCapture();
+        let finished = false;
+        let restackId = 0;
+        let paintId = 0;
+        let timerId = 0;
+        let idleId = 0;
+        const cleanup = () => {
+            if (restackId) {
+                global.display.disconnect(restackId);
+                restackId = 0;
+            }
+            if (paintId) {
+                global.stage.disconnect(paintId);
+                paintId = 0;
+            }
+            if (timerId) {
+                GLib.source_remove(timerId);
+                timerId = 0;
+            }
+            if (idleId) {
+                GLib.source_remove(idleId);
+                idleId = 0;
+            }
+            if (this._raiseCapture?.cleanup === cleanup)
+                this._raiseCapture = null;
+        };
+        const shoot = () => {
+            if (finished)
+                return;
+            finished = true;
+            cleanup();
+            try {
+                const png = this._png(metaWindow);
+                if (png?.length) {
+                    this._keep(metaWindow, png);
+                    done();
+                    return;
+                }
+            } catch (error) {
+                console.error(`Context Tap window capture failed: ${error}`);
+            }
+            this._pngAsync(metaWindow, done);
+        };
+        const paintThenShoot = () => {
+            if (finished || paintId)
+                return;
+            paintId = global.stage.connect('after-paint', () => {
+                if (paintId) {
+                    global.stage.disconnect(paintId);
+                    paintId = 0;
+                }
+                shoot();
+            });
+        };
+        const consider = () => {
+            this._armFirstFrame(metaWindow);
+            if (finished || !this._hasFrame(metaWindow))
+                return;
+            if (this._isOnTop(metaWindow))
+                paintThenShoot();
+        };
+        this._armFirstFrame(metaWindow);
+        restackId = global.display.connect('restacked', consider);
+        idleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            idleId = 0;
+            consider();
+            return GLib.SOURCE_REMOVE;
+        });
+        const limit = this._hasFrame(metaWindow) ? 250 : 2000;
+        timerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, limit, () => {
+            timerId = 0;
+            shoot();
+            return GLib.SOURCE_REMOVE;
+        });
+        this._raiseCapture = {cleanup, consider, window: metaWindow};
     }
 
     _emitFocus(next, prev) {
@@ -583,6 +778,31 @@ export default class GnomeAiAssistantExtension extends Extension {
         return found;
     }
 
+    _setWidth(width) {
+        const requested = Math.max(210, Math.round(Number(width)));
+        for (const win of this._assistantWindows()) {
+            const frame = win.get_frame_rect();
+            const area = win.get_work_area_current_monitor();
+            if (!frame || !area)
+                continue;
+            const next = Math.min(requested, Math.max(1, area.width));
+            let x = frame.x;
+            let y = frame.y;
+            let height = frame.height;
+            if (this._mode === 'left' || this._mode === 'right') {
+                y = area.y;
+                height = area.height;
+                x = this._mode === 'left' ? area.x : area.x + area.width - next;
+            } else if (x + next > area.x + area.width) {
+                x = area.x + area.width - next;
+            }
+            if (x < area.x)
+                x = area.x;
+            this._holdPlacement();
+            win.move_resize_frame(true, x, y, next, height);
+        }
+    }
+
     _watch(win) {
         if (this._watched === win)
             return;
@@ -603,8 +823,8 @@ export default class GnomeAiAssistantExtension extends Extension {
         });
     }
 
-    _releaseIfMoved(win) {
-        if (this._holding || (this._mode !== 'left' && this._mode !== 'right'))
+    _releaseIfMoved(win, fromUser = false) {
+        if ((!fromUser && this._holding) || (this._mode !== 'left' && this._mode !== 'right'))
             return;
         const frame = win.get_frame_rect();
         const area = win.get_work_area_current_monitor();

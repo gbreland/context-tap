@@ -1,4 +1,4 @@
-import {ancestorPids, clientForWindow, parentPid, parseActivePane, parseClients} from '../src/tmux.js';
+import {ancestorPids, clientForWindow, parentPid, parseActivePane, parseClients, trimCapture} from '../src/tmux.js';
 
 const plain = parentPid('123 (bash) S 45 123 123');
 if (plain !== 45)
@@ -32,5 +32,8 @@ if (pane?.id !== '%2' || pane.directory !== '/tmp' || pane.title !== 'work')
 const only = parseActivePane('%3\t0\t/var\tlone');
 if (only?.id !== '%3')
     throw new Error('a single pane must be used');
+const kept = trimCapture('prompt\n\n   \n');
+if (kept !== 'prompt')
+    throw new Error(`capture must end on the last text line: ${JSON.stringify(kept)}`);
 
 print('tmux tests passed');

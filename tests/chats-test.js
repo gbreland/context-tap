@@ -30,6 +30,13 @@ const messages = zipMessages([
 assert(messages[0].sentAt === 50 && messages[1].elapsedMs === 1500, JSON.stringify(messages));
 assert(countPairs(messages) === 1, 'pairs');
 assert(turnsFrom(messages)[0].elapsedMs === 1500, 'turns');
+const counted = zipMessages([
+    {role: 'user', text: 'Hi'},
+    {role: 'assistant', text: 'Hello'},
+], [{sentAt: 50, elapsedMs: 1500, inputTokens: 1200, outputTokens: 40}]);
+assert(counted[0].inputTokens === 1200 && counted[1].outputTokens === 40, JSON.stringify(counted));
+assert(turnsFrom(counted)[0].inputTokens === 1200 && turnsFrom(counted)[0].outputTokens === 40, 'usage turns');
+assert(normalizeIndex({chats: [{id: 4, turns: [{inputTokens: 3.2, outputTokens: -1}]}]}).chats[0].turns[0].inputTokens === 3, 'usage normalize');
 assert(normalizeIndex({chats: [{id: 4}]}).chats[0].id === '4', 'id string');
 
 print('chat tests passed');

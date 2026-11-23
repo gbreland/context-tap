@@ -1,2 +1,4 @@
 #!/bin/sh
-exec gjs -m /home/gbreland/Projects/TermAI/context-tap/src/main.js "$@"
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+exec gjs -m "$root/src/main.js" "$@"

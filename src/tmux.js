@@ -66,6 +66,10 @@ export function clientForWindow(clients, windowPid, readStat) {
     return null;
 }
 
+export function trimCapture(text) {
+    return String(text ?? '').trim();
+}
+
 function runTmux(args) {
     let proc;
     try {
@@ -119,7 +123,7 @@ export function contextForPid(windowPid) {
         return null;
     let text = '';
     try {
-        text = runTmux(['capture-pane', '-p', '-t', pane.id, '-S', '-200']);
+        text = trimCapture(runTmux(['capture-pane', '-p', '-t', pane.id, '-S', '-200']));
     } catch {
         return null;
     }

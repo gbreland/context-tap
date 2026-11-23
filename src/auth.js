@@ -293,6 +293,26 @@ export function loadSession() {
     return readJson('chatgpt-auth.json');
 }
 
+function idClaims(token) {
+    try {
+        const part = String(token ?? '').split('.')[1];
+        if (!part)
+            return {};
+        const padded = part.replaceAll('-', '+').replaceAll('_', '/')
+            .padEnd(part.length + (4 - part.length % 4) % 4, '=');
+        return JSON.parse(new TextDecoder().decode(Uint8Array.from(GLib.base64_decode(padded))));
+    } catch {
+        return {};
+    }
+}
+
+function profileName(claims) {
+    const name = String(claims?.name ?? '').trim();
+    if (name)
+        return name;
+    return [claims?.given_name, claims?.family_name].filter(Boolean).join(' ').trim();
+}
+
 export class ChatGpt {
     constructor() {
         this.session = new Soup.Session();
@@ -312,6 +332,13 @@ export class ChatGpt {
 
     email() {
         return this.auth?.email ?? '';
+    }
+
+    name() {
+        const stored = String(this.auth?.name ?? '').trim();
+        if (stored)
+            return stored;
+        return profileName(idClaims(this.auth?.id_token));
     }
 
     async signIn() {
@@ -368,6 +395,7 @@ export class ChatGpt {
             || (identity.aud && identity.aud !== 'dynamic_agent_client' ? identity.aud : exchangeId);
         this.auth = {
             email: identity.email ?? '',
+            name: profileName(identity),
             issuer: identity.iss,
             subject: identity.sub,
             client_id: issued,
@@ -490,6 +518,7 @@ export class ChatGpt {
         let pending = '';
         let text = '';
         let completed = false;
+        let usage = null;
         const takeBlocks = () => {
             let split = pending.indexOf('\n\n');
             while (split >= 0) {
@@ -510,6 +539,7 @@ export class ChatGpt {
                     onDelta(text);
                 } else if (event.type === 'response.completed') {
                     completed = true;
+                    usage = usageFrom(event.response?.usage);
                 } else if (event.type === 'response.failed') {
                     throw new Error(event.response?.error?.message ?? 'ChatGPT request failed.');
                 }
@@ -526,8 +556,25 @@ export class ChatGpt {
         takeBlocks();
         if (!completed)
             throw new Error('ChatGPT ended the reply before it was complete.');
-        return text;
+        return {text, usage};
     }
+}
+
+function usageFrom(raw) {
+    if (!raw)
+        return null;
+    const input = Number(raw.input_tokens);
+    const output = Number(raw.output_tokens);
+    if (!Number.isFinite(input) && !Number.isFinite(output))
+        return null;
+    const inTokens = Number.isFinite(input) ? input : 0;
+    const outTokens = Number.isFinite(output) ? output : 0;
+    const total = Number(raw.total_tokens);
+    return {
+        input: inTokens,
+        output: outTokens,
+        total: Number.isFinite(total) ? total : inTokens + outTokens,
+    };
 }
 
 function readSome(stream) {

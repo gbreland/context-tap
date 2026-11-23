@@ -18,6 +18,7 @@ import {contextForPid, sendToPane} from './tmux.js';
 const CHAT_FILE = 'chat.json';
 const LAYOUT_FILE = 'layout.json';
 const LAUNCH_HEIGHT = 760;
+const CONTEXT_WIDTH = 600;
 
 function naturalScroll(scroller) {
     const viewport = scroller.get_first_child();
@@ -63,35 +64,38 @@ function loadLayout() {
             ? data.colorScheme
             : 'default';
         const width = Math.round(Number(data.width));
+        const contextWidth = Math.round(Number(data.contextWidth));
         return {
             contextPercent: clampContextPercent(data.contextPercent),
             colorScheme,
             width: width >= 1 ? width : 0,
+            contextWidth: contextWidth >= 1 ? contextWidth : 0,
+            submitCtrl: data.submitCtrl === true,
         };
     } catch {
-        return {contextPercent: 50, colorScheme: 'default', width: 0};
+        return {contextPercent: 50, colorScheme: 'default', width: 0, contextWidth: 0, submitCtrl: false};
     }
 }
 
-function saveLayout(percent, colorScheme, width = 0) {
+function saveLayout(percent, colorScheme, width = 0, submitCtrl = false, contextWidth = 0, contextOpen = false) {
     const scheme = colorScheme === 'light' || colorScheme === 'dark' ? colorScheme : 'default';
     const nextWidth = Math.round(Number(width));
+    const settingsWidth = Math.round(Number(contextWidth));
     const payload = {
         contextPercent: clampContextPercent(percent),
         colorScheme: scheme,
+        submitCtrl: submitCtrl === true,
     };
     if (nextWidth >= 1)
         payload.width = nextWidth;
+    if (settingsWidth >= 1)
+        payload.contextWidth = settingsWidth;
+    if (contextOpen)
+        payload.contextOpen = true;
     const file = Gio.File.new_for_path(GLib.build_filenamev([dataDir(), LAYOUT_FILE]));
     const stream = file.replace(null, false, Gio.FileCreateFlags.PRIVATE, null);
     stream.write_bytes(GLib.Bytes.new(new TextEncoder().encode(JSON.stringify(payload))), null);
     stream.close(null);
-}
-
-function previewTexture(png) {
-    const stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(png));
-    const pixbuf = GdkPixbuf.Pixbuf.new_from_stream(stream, null);
-    return Gdk.Texture.new_for_pixbuf(pixbuf);
 }
 
 export function openWindow(application, services) {
@@ -100,6 +104,9 @@ export function openWindow(application, services) {
     const layout = loadLayout();
     let windowWidth = layout.width;
     let widthSet = layout.width >= 1;
+    let contextWidth = layout.contextWidth >= 1 ? layout.contextWidth : CONTEXT_WIDTH;
+    let contextOpen = false;
+    let ignoreWidth = false;
     let widthSave = 0;
     let acceptWidth = false;
     let chatIndex = loadChats();
@@ -126,6 +133,41 @@ export function openWindow(application, services) {
     let splitSave = 0;
     let splitPercent = layout.contextPercent;
     let colorScheme = layout.colorScheme;
+    let submitCtrl = layout.submitCtrl;
+
+    function persistLayout() {
+        saveLayout(
+            splitPercent,
+            colorScheme,
+            widthSet ? windowWidth : 0,
+            submitCtrl,
+            contextWidth,
+            contextOpen);
+    }
+
+    function shownWidth() {
+        if (contextOpen)
+            return contextWidth >= 1 ? contextWidth : CONTEXT_WIDTH;
+        return windowWidth || window.get_width() || 1;
+    }
+
+    function applyAppWidth(width) {
+        ignoreWidth = true;
+        const target = Math.max(200, Math.round(Number(width)) || 200);
+        try {
+            shell.setWidth(target);
+        } catch {
+            /* The shell applies the width when it is connected. */
+        }
+        const height = window.get_height();
+        if (height > 1)
+            window.set_default_size(target, height);
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+            ignoreWidth = false;
+            rememberWidth(window.get_width());
+            return GLib.SOURCE_REMOVE;
+        });
+    }
     let applyingSplit = false;
     let splitReady = false;
     let policyFit = 0;
@@ -157,9 +199,10 @@ export function openWindow(application, services) {
     const window = new Adw.ApplicationWindow({
         application,
         title: 'Context Tap',
-        default_width: layout.width || 1,
+        default_width: Math.max(layout.width || 210, 210),
         default_height: LAUNCH_HEIGHT,
     });
+    window.set_size_request(210, 200);
 
     const errorText = new Gtk.Label({
         xalign: 0,
@@ -203,13 +246,21 @@ export function openWindow(application, services) {
     const entry = new Gtk.TextView({
         wrap_mode: Gtk.WrapMode.WORD_CHAR,
         accepts_tab: false,
-        height_request: 64,
         left_margin: 12,
         right_margin: 12,
         top_margin: 8,
         bottom_margin: 8,
-        css_classes: ['card', 'chat-input'],
+        css_classes: ['chat-input'],
         hexpand: true,
+        vexpand: false,
+    });
+    const entryScroll = new Gtk.ScrolledWindow({
+        child: entry,
+        hexpand: true,
+        vexpand: false,
+        propagate_natural_height: false,
+        hscrollbar_policy: Gtk.PolicyType.NEVER,
+        vscrollbar_policy: Gtk.PolicyType.EXTERNAL,
     });
     const entryHint = new Gtk.Label({
         label: 'Ask AI something',
@@ -222,42 +273,124 @@ export function openWindow(application, services) {
         can_target: false,
         css_classes: ['dim-label'],
     });
-    const entryOverlay = new Gtk.Overlay({hexpand: true, child: entry});
+    const entryOverlay = new Gtk.Overlay({hexpand: true, vexpand: false, child: entryScroll});
     entryOverlay.add_overlay(entryHint);
     const send = new Gtk.Button({
-        label: 'Send',
-        css_classes: ['suggested-action'],
-        valign: Gtk.Align.CENTER,
+        child: new Gtk.Image({
+            icon_name: 'go-up-symbolic',
+            pixel_size: 22,
+        }),
+        tooltip_text: 'Send',
+        css_classes: ['chat-send'],
+        valign: Gtk.Align.FILL,
+        vexpand: false,
+        width_request: 30,
     });
-    const shotToggle = new Gtk.CheckButton({
-        tooltip_text: 'Send the screenshot',
-        valign: Gtk.Align.CENTER,
+    const entryShell = new Gtk.Box({
+        hexpand: true,
+        vexpand: false,
+        css_classes: ['chat-input-shell'],
+        overflow: Gtk.Overflow.HIDDEN,
+    });
+    entryShell.append(entryOverlay);
+    entryShell.append(send);
+
+    let entrySizeKey = '';
+
+    function textPixelHeight(text, wrapWidth) {
+        const layout = entry.create_pango_layout(text);
+        if (wrapWidth > 1) {
+            layout.set_width(wrapWidth * Pango.SCALE);
+            layout.set_wrap(Pango.WrapMode.WORD_CHAR);
+        }
+        return layout.get_pixel_size()[1] ?? 0;
+    }
+
+    function fitEntry() {
+        const twoLines = textPixelHeight('Ag\nAg', 0);
+        if (twoLines < 8)
+            return;
+        const pad = entry.top_margin + entry.bottom_margin;
+        const minHeight = twoLines + pad;
+        const [start, end] = entry.buffer.get_bounds();
+        const text = entry.buffer.get_text(start, end, false);
+        const inner = entry.get_width() - entry.left_margin - entry.right_margin;
+        const block = text ? textPixelHeight(text, inner) + pad : minHeight;
+        const content = Math.max(minHeight, block);
+        const windowHeight = window.get_height();
+        const cap = windowHeight >= 8
+            ? Math.max(minHeight, Math.floor(windowHeight * 0.5))
+            : content;
+        const atCap = content > cap;
+        entryScroll.vscrollbar_policy = atCap
+            ? Gtk.PolicyType.AUTOMATIC
+            : Gtk.PolicyType.EXTERNAL;
+        entryScroll.height_request = atCap ? cap : content;
+    }
+
+    entryShell.add_tick_callback(() => {
+        const key = `${window.get_height()}:${entry.get_width()}`;
+        if (key !== entrySizeKey) {
+            entrySizeKey = key;
+            fitEntry();
+        }
+        return GLib.SOURCE_CONTINUE;
     });
     const shotThumb = new Gtk.Picture({
-        width_request: 72,
-        height_request: 48,
         can_shrink: true,
-        content_fit: Gtk.ContentFit.COVER,
+        content_fit: Gtk.ContentFit.SCALE_DOWN,
+        halign: Gtk.Align.CENTER,
+        valign: Gtk.Align.CENTER,
+        hexpand: false,
+        vexpand: false,
     });
-    const shotRow = new Gtk.Box({spacing: 6});
-    shotRow.append(shotToggle);
-    shotRow.append(shotThumb);
-    const shotChip = new Gtk.Box({
-        orientation: Gtk.Orientation.VERTICAL,
-        spacing: 2,
-        visible: false,
-        halign: Gtk.Align.START,
+    const shotFrame = new Gtk.Box({
+        halign: Gtk.Align.CENTER,
+        valign: Gtk.Align.CENTER,
     });
-    shotChip.append(new Gtk.Label({
-        label: 'Screenshot',
-        xalign: 0,
-        css_classes: ['caption', 'dim-label'],
-    }));
-    shotChip.append(shotRow);
-    const dataToggle = new Gtk.CheckButton({
-        tooltip_text: 'Send the app data',
-        valign: Gtk.Align.START,
+    shotFrame.append(shotThumb);
+    shotThumb.can_target = false;
+    shotFrame.can_target = false;
+    const shotToggle = new Gtk.ToggleButton({
+        css_classes: ['context-card'],
+        hexpand: true,
+        child: shotFrame,
     });
+    function includeBadge() {
+        const icon = new Gtk.Image({
+            icon_name: 'object-select-symbolic',
+            pixel_size: 12,
+            halign: Gtk.Align.CENTER,
+            valign: Gtk.Align.CENTER,
+            hexpand: true,
+            vexpand: true,
+            can_target: false,
+            visible: false,
+        });
+        const badge = new Gtk.Box({
+            halign: Gtk.Align.END,
+            valign: Gtk.Align.CENTER,
+            margin_end: 8,
+            can_target: false,
+            width_request: 18,
+            height_request: 18,
+            css_classes: ['context-mark'],
+        });
+        badge.append(icon);
+        return {badge, icon};
+    }
+
+    function paintBadge(mark, on) {
+        mark.icon.visible = on;
+        if (on)
+            mark.badge.add_css_class('on');
+        else
+            mark.badge.remove_css_class('on');
+    }
+
+    const shotMark = includeBadge();
+    const shotWrap = new Gtk.Overlay({child: shotToggle, visible: false});
+    shotWrap.add_overlay(shotMark.badge);
     const dataBuffer = new Gtk.TextBuffer();
     const dataView = new Gtk.TextView({
         buffer: dataBuffer,
@@ -266,75 +399,136 @@ export function openWindow(application, services) {
         wrap_mode: Gtk.WrapMode.WORD_CHAR,
         accepts_tab: false,
         left_margin: 6,
-        right_margin: 6,
+        right_margin: 28,
         top_margin: 4,
         bottom_margin: 4,
         css_classes: ['data-preview'],
     });
+    dataView.can_target = false;
     const dataScroll = new Gtk.ScrolledWindow({
         child: dataView,
         hexpand: true,
         propagate_natural_height: false,
         hscrollbar_policy: Gtk.PolicyType.NEVER,
-        vscrollbar_policy: Gtk.PolicyType.AUTOMATIC,
+        vscrollbar_policy: Gtk.PolicyType.EXTERNAL,
         height_request: 48,
         css_classes: ['data-preview'],
     });
-    const dataTextRow = new Gtk.Box({spacing: 6});
-    dataTextRow.append(dataToggle);
-    dataTextRow.append(dataScroll);
-    const dataPreview = new Gtk.Box({
-        orientation: Gtk.Orientation.VERTICAL,
-        spacing: 2,
-        visible: false,
-        margin_start: 12,
-        margin_end: 12,
-        margin_bottom: 6,
-    });
-    dataPreview.append(new Gtk.Label({
-        label: 'Data',
-        xalign: 0,
-        css_classes: ['caption', 'dim-label'],
-    }));
-    dataPreview.append(dataTextRow);
-    const emptyCapture = new Gtk.Label({
-        xalign: 0,
+    dataScroll.can_target = false;
+    const dataPort = dataScroll.get_first_child();
+    if (dataPort)
+        dataPort.can_target = false;
+    const dataToggle = new Gtk.ToggleButton({
+        css_classes: ['context-card'],
         hexpand: true,
-        label: 'No app context was captured.',
-        css_classes: ['dim-label'],
+        child: dataScroll,
     });
-    const captureStrip = new Gtk.Box({
-        orientation: Gtk.Orientation.VERTICAL,
-        spacing: 8,
-        hexpand: true,
-        valign: Gtk.Align.CENTER,
-        halign: Gtk.Align.START,
+    const dataMark = includeBadge();
+    const dataWrap = new Gtk.Overlay({child: dataToggle, visible: false});
+    dataWrap.add_overlay(dataMark.badge);
+    const dataTipView = new Gtk.TextView({
+        buffer: dataBuffer,
+        editable: false,
+        cursor_visible: false,
+        wrap_mode: Gtk.WrapMode.WORD_CHAR,
+        left_margin: 8,
+        right_margin: 8,
+        top_margin: 8,
+        bottom_margin: 8,
+        css_classes: ['data-preview-tip'],
     });
-    captureStrip.append(shotChip);
-    captureStrip.append(emptyCapture);
+    const dataTipScroll = new Gtk.ScrolledWindow({
+        child: dataTipView,
+        width_request: 420,
+        height_request: 240,
+        hscrollbar_policy: Gtk.PolicyType.NEVER,
+        vscrollbar_policy: Gtk.PolicyType.AUTOMATIC,
+    });
+    dataToggle.connect('query-tooltip', (_widget, _x, _y, _keyboard, tooltip) => {
+        const [start, end] = dataBuffer.get_bounds();
+        if (!dataBuffer.get_text(start, end, false))
+            return false;
+        tooltip.set_custom(dataTipScroll);
+        return true;
+    });
+    const shotTip = new Gtk.Picture({
+        can_shrink: true,
+        content_fit: Gtk.ContentFit.SCALE_DOWN,
+    });
+    let shotTipKey = '';
+    shotToggle.connect('query-tooltip', (_widget, _x, _y, _keyboard, tooltip) => {
+        const image = imageForMessage();
+        if (!image?.png?.length)
+            return false;
+        const key = `${image.appId}:${image.timestamp}:${image.png.length}`;
+        if (key !== shotTipKey) {
+            try {
+                const stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(image.png));
+                const pixbuf = GdkPixbuf.Pixbuf.new_from_stream(stream, null);
+                const scale = Math.min(1, 520 / pixbuf.get_width(), 400 / pixbuf.get_height());
+                const width = Math.max(1, Math.round(pixbuf.get_width() * scale));
+                const height = Math.max(1, Math.round(pixbuf.get_height() * scale));
+                const fitted = scale < 1
+                    ? pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
+                    : pixbuf;
+                shotTip.paintable = Gdk.Texture.new_for_pixbuf(fitted);
+                shotTip.width_request = width;
+                shotTip.height_request = height;
+                shotTipKey = key;
+            } catch {
+                return false;
+            }
+        }
+        tooltip.set_custom(shotTip);
+        return true;
+    });
     const entryRow = new Gtk.Box({
         spacing: 8,
         margin_start: 12,
         margin_end: 12,
         margin_bottom: 8,
     });
-    entryRow.append(entryOverlay);
-    entryRow.append(send);
-    const sendRow = new Gtk.Box({
-        margin_start: 12,
-        margin_end: 12,
-        margin_bottom: 4,
-    });
-    sendRow.append(captureStrip);
+    entryRow.append(entryShell);
 
     const contextButton = new Gtk.ToggleButton({
-        label: 'Context',
+        child: new Gtk.Image({
+            icon_name: 'preferences-system-symbolic',
+            pixel_size: 18,
+        }),
         tooltip_text: 'Show the context sent to ChatGPT',
-        css_classes: ['suggested-action', 'context-button'],
+        css_classes: ['context-gear'],
+        valign: Gtk.Align.FILL,
+        vexpand: false,
+        width_request: 30,
     });
+    const contextItems = new Gtk.Box({
+        orientation: Gtk.Orientation.VERTICAL,
+        spacing: 6,
+        hexpand: true,
+        margin_start: 8,
+        margin_end: 4,
+        margin_top: 6,
+        margin_bottom: 6,
+    });
+    contextItems.append(dataWrap);
+    contextItems.append(shotWrap);
+    const contextShell = new Gtk.Box({
+        hexpand: true,
+        vexpand: false,
+        visible: false,
+        margin_start: 12,
+        margin_end: 12,
+        margin_bottom: 12,
+        visible: true,
+        css_classes: ['chat-input-shell'],
+        overflow: Gtk.Overflow.HIDDEN,
+    });
+    contextShell.append(contextItems);
+    contextShell.append(contextButton);
     const holdLabel = new Gtk.Label({
         label: 'Check a box, or press Send again to leave that item out.',
         wrap: true,
+        ellipsize: Pango.EllipsizeMode.END,
         xalign: 0,
         visible: false,
         css_classes: ['caption', 'dim-label'],
@@ -353,35 +547,52 @@ export function openWindow(application, services) {
     function cappedLabel(extraClasses) {
         return new Gtk.Label({
             wrap: true,
-            wrap_mode: Gtk.WrapMode.WORD,
+            wrap_mode: Gtk.WrapMode.WORD_CHAR,
             selectable: false,
             xalign: 0,
+            hexpand: true,
+            width_chars: 24,
             max_width_chars: 48,
             css_classes: extraClasses,
         });
     }
 
     function sectionTitle(text) {
-        return new Gtk.Label({
+        const label = new Gtk.Label({
             label: text,
             xalign: 0,
             hexpand: true,
-            css_classes: ['context-title'],
+            ellipsize: Pango.EllipsizeMode.END,
+        });
+        const copy = copyButton();
+        const box = new Gtk.Box({spacing: 4, hexpand: true});
+        box.append(label);
+        box.append(copy);
+        return {box, copy};
+    }
+
+    function copyButton() {
+        return new Gtk.Button({
+            icon_name: 'edit-copy-symbolic',
+            tooltip_text: 'Copy',
+            css_classes: ['flat'],
+            valign: Gtk.Align.CENTER,
         });
     }
 
-    function allowSection(title, check) {
+    function allowSection(name, check) {
         check.tooltip_text = 'Send this section';
         check.valign = Gtk.Align.START;
+        const header = sectionTitle(name);
         const expander = new Gtk.Expander({
-            label_widget: sectionTitle(title),
+            label_widget: header.box,
             hexpand: true,
             expanded: false,
         });
         const row = new Gtk.Box({spacing: 6});
         row.append(check);
         row.append(expander);
-        return {row, expander};
+        return {row, expander, copy: header.copy};
     }
 
     const policyCheck = new Gtk.CheckButton({
@@ -390,8 +601,9 @@ export function openWindow(application, services) {
         tooltip_text: 'These instructions are always sent',
         valign: Gtk.Align.START,
     });
+    const policyTitle = sectionTitle('Always sent');
     const policyExpander = new Gtk.Expander({
-        label_widget: sectionTitle('Always sent'),
+        label_widget: policyTitle.box,
         hexpand: true,
         expanded: false,
         child: policyView,
@@ -400,83 +612,161 @@ export function openWindow(application, services) {
     const policyRow = new Gtk.Box({spacing: 6});
     policyRow.append(policyCheck);
     policyRow.append(policyExpander);
+    policyTitle.copy.connect('clicked', () => {
+        const [start, end] = policyBuffer.get_bounds();
+        copyText(policyBuffer.get_text(start, end, false));
+    });
 
     const hostCheck = new Gtk.CheckButton();
-    const hostBody = cappedLabel(['monospace', 'caption']);
+    const hostBody = cappedLabel(['context-detail']);
     const hostParts = allowSection('Host', hostCheck);
     hostParts.expander.child = hostBody;
+    hostParts.copy.connect('clicked', () => copyText(hostBody.label));
 
     const packageCheck = new Gtk.CheckButton();
     const packageNoteLabel = new Gtk.Label({
         wrap: true,
+        ellipsize: Pango.EllipsizeMode.END,
         xalign: 0,
+        hexpand: true,
         css_classes: ['caption', 'dim-label'],
     });
-    const packageBody = cappedLabel(['monospace', 'caption']);
+    const packageBody = cappedLabel(['context-detail']);
     const packageBox = new Gtk.Box({orientation: Gtk.Orientation.VERTICAL, spacing: 4});
     packageBox.append(packageNoteLabel);
     packageBox.append(packageBody);
     const packageParts = allowSection('Packages', packageCheck);
     packageParts.expander.child = packageBox;
+    packageParts.copy.connect('clicked', () => {
+        const note = String(packageNoteLabel.label ?? '').trim();
+        const body = packageBody.label ?? '';
+        copyText(note ? `${note}\n${body}` : body);
+    });
 
     const graphicsCheck = new Gtk.CheckButton();
-    const graphicsBody = cappedLabel(['monospace', 'caption']);
+    const graphicsBody = cappedLabel(['context-detail']);
     const graphicsParts = allowSection('Graphics', graphicsCheck);
     graphicsParts.expander.child = graphicsBody;
+    graphicsParts.copy.connect('clicked', () => copyText(graphicsBody.label));
 
     const termCheck = new Gtk.CheckButton();
-    const termBody = cappedLabel(['monospace', 'caption']);
+    const termBody = cappedLabel(['context-detail']);
     const termParts = allowSection('Data', termCheck);
     termParts.expander.child = termBody;
+    termParts.copy.connect('clicked', () => copyText(termBody.label));
     const termSection = termParts.row;
 
     const actionCheck = new Gtk.CheckButton();
     const actionBody = new Gtk.Label({
         xalign: 0,
+        hexpand: true,
         wrap: true,
         wrap_mode: Gtk.WrapMode.WORD,
+        natural_wrap_mode: Gtk.NaturalWrapMode.INHERIT,
+        width_chars: 24,
         max_width_chars: 48,
         selectable: true,
         label: TERMINAL_ACTION_TEXT,
+        css_classes: ['context-detail'],
     });
-    const actionParts = allowSection('Terminal Instructions', actionCheck);
+    const actionParts = allowSection('AI Instructions', actionCheck);
     actionParts.expander.child = actionBody;
+    actionParts.copy.connect('clicked', () => copyText(actionBody.label));
     const actionSection = actionParts.row;
     actionSection.visible = false;
 
     const shotCheck = new Gtk.CheckButton();
     const shotCaption = new Gtk.Label({
         wrap: true,
+        ellipsize: Pango.EllipsizeMode.END,
         xalign: 0,
+        hexpand: true,
         css_classes: ['caption', 'dim-label'],
     });
     const shotPicture = new Gtk.Picture({
-        hexpand: true,
         can_shrink: true,
-        content_fit: Gtk.ContentFit.CONTAIN,
+        content_fit: Gtk.ContentFit.SCALE_DOWN,
+        halign: Gtk.Align.CENTER,
+        valign: Gtk.Align.START,
+        hexpand: false,
+        vexpand: false,
     });
-    function fitShot() {
-        const paintable = shotPicture.paintable;
-        const width = shotPicture.get_width();
-        if (!paintable || width < 8)
-            return;
-        const imageWidth = paintable.get_width();
-        const imageHeight = paintable.get_height();
-        if (!(imageWidth > 0) || !(imageHeight > 0))
-            return;
-        const next = Math.max(1, Math.round(width * imageHeight / imageWidth));
-        if (shotPicture.height_request !== next)
-            shotPicture.height_request = next;
+    function shotLimits() {
+        const windowHeight = window.get_height();
+        const windowWidth = window.get_width();
+        if (windowHeight < 8 || windowWidth < 8)
+            return null;
+        return {
+            height: Math.max(1, Math.floor(windowHeight * 0.15)),
+            width: Math.max(1, windowWidth - 64),
+        };
     }
-    shotPicture.add_tick_callback(() => {
-        fitShot();
+
+    function fittedPreview(png, limits) {
+        const stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(png));
+        const pixbuf = GdkPixbuf.Pixbuf.new_from_stream(stream, null);
+        const imageWidth = pixbuf.get_width();
+        const imageHeight = pixbuf.get_height();
+        if (!(imageWidth > 0) || !(imageHeight > 0))
+            return null;
+        const scale = Math.min(1, limits.height / imageHeight, limits.width / imageWidth);
+        const width = Math.max(1, Math.round(imageWidth * scale));
+        const height = Math.max(1, Math.round(imageHeight * scale));
+        const fitted = width === imageWidth && height === imageHeight
+            ? pixbuf
+            : pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR);
+        if (!fitted)
+            return null;
+        return {texture: Gdk.Texture.new_for_pixbuf(fitted), width, height};
+    }
+
+    const stripFit = {key: '', png: null};
+    const panelFit = {key: '', png: null};
+
+    function applyFitted(picture, fit) {
+        const limits = shotLimits();
+        if (!fit.png?.length || !limits)
+            return false;
+        const key = `${limits.width}x${limits.height}:${fit.png.length}`;
+        if (fit.key === key && picture.paintable)
+            return true;
+        const fitted = fittedPreview(fit.png, limits);
+        if (!fitted)
+            return false;
+        fit.key = key;
+        picture.paintable = fitted.texture;
+        picture.width_request = -1;
+        picture.height_request = -1;
+        return true;
+    }
+
+    shotThumb.add_tick_callback(() => {
+        if (shotThumb.visible)
+            applyFitted(shotThumb, stripFit);
         return GLib.SOURCE_CONTINUE;
     });
+    shotPicture.add_tick_callback(() => {
+        if (shotPicture.visible)
+            applyFitted(shotPicture, panelFit);
+        return GLib.SOURCE_CONTINUE;
+    });
+    const shotPanelFrame = new Gtk.Box({
+        halign: Gtk.Align.CENTER,
+        valign: Gtk.Align.START,
+    });
+    shotPanelFrame.append(shotPicture);
     const shotBox = new Gtk.Box({orientation: Gtk.Orientation.VERTICAL, spacing: 4});
     shotBox.append(shotCaption);
-    shotBox.append(shotPicture);
+    shotBox.append(shotPanelFrame);
     const shotParts = allowSection('Screenshot', shotCheck);
     shotParts.expander.child = shotBox;
+    shotParts.copy.connect('clicked', () => {
+        const image = imageForMessage();
+        if (image?.png?.length)
+            copyPng(image.png);
+        else
+            copyText(shotCaption.label ?? '');
+    });
     const shotSection = shotParts.row;
 
     const contextBody = new Gtk.Box({
@@ -493,11 +783,14 @@ export function openWindow(application, services) {
     contextBody.append(shotSection);
     const contextScroll = new Gtk.ScrolledWindow({
         child: contextBody,
-        vexpand: true,
+        hexpand: true,
+        vexpand: false,
+        visible: false,
+        propagate_natural_height: false,
         hscrollbar_policy: Gtk.PolicyType.NEVER,
         vscrollbar_policy: Gtk.PolicyType.AUTOMATIC,
     });
-    naturalScroll(contextScroll);
+    contextItems.append(contextScroll);
     const contextPanel = new Gtk.Box({
         orientation: Gtk.Orientation.VERTICAL,
         visible: false,
@@ -509,30 +802,15 @@ export function openWindow(application, services) {
         css_classes: ['context-panel'],
         overflow: Gtk.Overflow.HIDDEN,
     });
-    contextPanel.append(contextScroll);
 
-    const captureAge = new Gtk.Label({
-        xalign: 0,
-        hexpand: true,
-        css_classes: ['dim-label'],
-    });
-    const timeRow = new Gtk.Box({
-        spacing: 8,
-        margin_start: 12,
-        margin_end: 12,
-        margin_bottom: 12,
-    });
-    timeRow.append(captureAge);
-    timeRow.append(contextButton);
     const chatColumn = new Gtk.Box({
         orientation: Gtk.Orientation.VERTICAL,
         vexpand: true,
+        hexpand: true,
     });
     chatColumn.append(scroller);
     chatColumn.append(entryRow);
-    chatColumn.append(dataPreview);
-    chatColumn.append(sendRow);
-    chatColumn.append(timeRow);
+    chatColumn.append(contextShell);
     const split = new Gtk.Paned({
         orientation: Gtk.Orientation.VERTICAL,
         vexpand: true,
@@ -561,14 +839,15 @@ export function openWindow(application, services) {
     nameBox.append(new Gtk.Box({hexpand: true}));
     const contextAge = new Gtk.Label({
         xalign: 1,
+        ellipsize: Pango.EllipsizeMode.END,
         css_classes: ['dim-label'],
     });
     const contextRow = new Gtk.Box({
         spacing: 12,
         margin_start: 12,
         margin_end: 12,
-        margin_top: 4,
-        margin_bottom: 8,
+        margin_top: 8,
+        margin_bottom: 4,
     });
     contextRow.append(nameBox);
     contextRow.append(contextAge);
@@ -583,13 +862,83 @@ export function openWindow(application, services) {
         'icons',
     ]));
 
-    const accountLabel = new Gtk.Label({
+    const signIn = new Gtk.Button({
         label: 'Sign in',
-        ellipsize: Pango.EllipsizeMode.END,
-        max_width_chars: 22,
+        tooltip_text: 'Sign in',
+        halign: Gtk.Align.CENTER,
+        valign: Gtk.Align.CENTER,
     });
-    const signIn = new Gtk.Button({child: accountLabel, tooltip_text: 'Sign in'});
+    const signInGate = new Gtk.CenterBox({
+        visible: false,
+        vexpand: true,
+        hexpand: true,
+    });
+    signInGate.set_center_widget(signIn);
+    chatColumn.prepend(signInGate);
+    const menuAccountLabel = new Gtk.Label({
+        xalign: 0,
+        hexpand: true,
+        ellipsize: Pango.EllipsizeMode.END,
+        max_width_chars: 28,
+    });
+    const menuAccountButton = new Gtk.Button({
+        child: menuAccountLabel,
+        css_classes: ['flat'],
+        hexpand: true,
+        visible: false,
+    });
+    const accountSep = new Gtk.Separator({visible: false});
+    const accountNameLabel = new Gtk.Label({
+        xalign: 0,
+        ellipsize: Pango.EllipsizeMode.END,
+        max_width_chars: 32,
+    });
+    const accountEmailLabel = new Gtk.Label({
+        xalign: 0,
+        ellipsize: Pango.EllipsizeMode.END,
+        max_width_chars: 32,
+        selectable: true,
+        css_classes: ['dim-label'],
+    });
+    const signOutButton = new Gtk.Button({
+        label: 'Sign out',
+        halign: Gtk.Align.END,
+    });
+    const accountCard = new Gtk.Box({
+        orientation: Gtk.Orientation.VERTICAL,
+        spacing: 6,
+        hexpand: true,
+        visible: false,
+        css_classes: ['account-card'],
+    });
+    accountCard.append(accountNameLabel);
+    accountCard.append(accountEmailLabel);
+    accountCard.append(signOutButton);
+    let accountOpen = false;
     const modelBox = new Gtk.DropDown({visible: false, hexpand: true, tooltip_text: 'Model'});
+    function shrinkModelLabel() {
+        const button = modelBox.get_first_child();
+        if (!button)
+            return;
+        const visit = widget => {
+            if (widget instanceof Gtk.Label) {
+                widget.ellipsize = Pango.EllipsizeMode.END;
+                widget.width_chars = 1;
+            }
+            let child = widget.get_first_child?.();
+            while (child) {
+                visit(child);
+                child = child.get_next_sibling();
+            }
+        };
+        visit(button);
+    }
+    modelBox.connect('notify::model', () => {
+        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            shrinkModelLabel();
+            return GLib.SOURCE_REMOVE;
+        });
+    });
     const aboveSwitch = new Gtk.Switch({
         valign: Gtk.Align.CENTER,
         active: false,
@@ -601,10 +950,22 @@ export function openWindow(application, services) {
         hexpand: true,
     }));
     aboveRow.append(aboveSwitch);
+    const submitSwitch = new Gtk.Switch({
+        valign: Gtk.Align.CENTER,
+        active: submitCtrl,
+    });
+    const submitRow = new Gtk.Box({spacing: 12});
+    submitRow.append(new Gtk.Label({
+        label: 'Submit with Ctrl+Enter',
+        xalign: 0,
+        hexpand: true,
+    }));
+    submitRow.append(submitSwitch);
     const dockBox = new Gtk.Box({
         css_classes: ['linked'],
         halign: Gtk.Align.CENTER,
     });
+    let dockGroup = null;
     const dockButtons = [
         ['left', 'aia-dock-left-symbolic', 'Dock left'],
         ['off', 'aia-dialog-symbolic', 'Default size'],
@@ -616,6 +977,10 @@ export function openWindow(application, services) {
             css_classes: ['flat'],
             active: mode === 'off',
         });
+        if (dockGroup)
+            button.group = dockGroup;
+        else
+            dockGroup = button;
         dockBox.append(button);
         return [mode, button];
     });
@@ -668,11 +1033,6 @@ export function openWindow(application, services) {
     });
     for (const [, button] of schemeButtons)
         styleRow.append(button);
-    const newChatButton = new Gtk.Button({
-        label: 'New Chat',
-        css_classes: ['flat'],
-        halign: Gtk.Align.CENTER,
-    });
     const menuBox = new Gtk.Box({
         orientation: Gtk.Orientation.VERTICAL,
         spacing: 6,
@@ -683,10 +1043,13 @@ export function openWindow(application, services) {
     });
     menuBox.append(styleRow);
     menuBox.append(new Gtk.Separator());
-    menuBox.append(aboveRow);
     menuBox.append(dockBox);
     menuBox.append(new Gtk.Separator());
-    menuBox.append(newChatButton);
+    menuBox.append(aboveRow);
+    menuBox.append(submitRow);
+    menuBox.append(accountSep);
+    menuBox.append(menuAccountButton);
+    menuBox.append(accountCard);
     const menuPopover = new Gtk.Popover({child: menuBox});
     const menuButton = new Gtk.MenuButton({
         icon_name: 'open-menu-symbolic',
@@ -698,20 +1061,30 @@ export function openWindow(application, services) {
     header.pack_end(menuButton);
 
     const appBar = new Gtk.Box({
-        spacing: 8,
+        orientation: Gtk.Orientation.VERTICAL,
+        spacing: 4,
         margin_start: 12,
         margin_end: 12,
-        margin_top: 8,
+        margin_top: 4,
         margin_bottom: 4,
     });
-    const appSpacer = new Gtk.Box({hexpand: true});
-    appBar.append(chatButton);
-    appBar.append(modelBox);
-    appBar.append(appSpacer);
-    appBar.append(signIn);
+    const chatRow = new Gtk.Box({spacing: 8});
+    const chatUsage = new Gtk.Label({
+        xalign: 1,
+        hexpand: true,
+        ellipsize: Pango.EllipsizeMode.END,
+        css_classes: ['dim-label', 'caption'],
+        visible: false,
+    });
+    chatRow.append(chatButton);
+    chatRow.append(chatUsage);
+    const accountRow = new Gtk.Box({spacing: 8});
+    accountRow.append(modelBox);
+    appBar.append(accountRow);
+    appBar.append(chatRow);
+    content.append(contextRow);
     content.append(errorBar);
     content.append(appBar);
-    content.append(contextRow);
     content.append(split);
 
     const toolbar = new Adw.ToolbarView();
@@ -728,16 +1101,48 @@ export function openWindow(application, services) {
         errorBar.visible = false;
     }
 
+    function syncModelTip() {
+        const item = models[modelBox.selected];
+        const text = item?.display_name || 'Model';
+        modelBox.tooltip_text = text;
+        const button = modelBox.get_first_child();
+        if (button)
+            button.tooltip_text = text;
+    }
+
+    function syncChatTip() {
+        const row = chatIndex.chats.find(item => item.id === chatId);
+        chatButton.tooltip_text = row?.title || 'Past chats';
+    }
+
     function updateAccount() {
         if (chatgpt.signedIn()) {
             const email = String(chatgpt.email() || '');
-            const at = email.indexOf('@');
-            accountLabel.label = at > 0 ? email.slice(0, at) : (email || 'Signed in');
-            signIn.tooltip_text = email || 'Sign out';
+            const name = String(chatgpt.name() || '') || 'Signed in';
+            menuAccountLabel.label = name;
+            menuAccountButton.tooltip_text = email || name;
+            accountNameLabel.label = name;
+            accountEmailLabel.label = email;
+            signInGate.visible = false;
+            contextRow.visible = true;
+            appBar.visible = true;
+            scroller.visible = true;
+            entryRow.visible = true;
             modelBox.visible = true;
+            accountSep.visible = true;
+            menuAccountButton.visible = true;
+            accountCard.visible = accountOpen;
         } else {
-            accountLabel.label = 'Sign in';
+            accountOpen = false;
+            accountCard.visible = false;
+            accountSep.visible = false;
+            menuAccountButton.visible = false;
             signIn.tooltip_text = 'Sign in';
+            signInGate.visible = true;
+            contextRow.visible = false;
+            appBar.visible = false;
+            scroller.visible = false;
+            entryRow.visible = false;
             modelBox.visible = false;
         }
     }
@@ -908,7 +1313,7 @@ export function openWindow(application, services) {
         const [, height] = layout.get_pixel_size();
         if (height < 8)
             return;
-        dataScroll.height_request = height + 10;
+        dataScroll.height_request = Math.max(1, Math.round((height + 10) * 0.9));
         dataFit = true;
     }
 
@@ -934,38 +1339,36 @@ export function openWindow(application, services) {
         const open = contextButton.active;
         const image = imageForMessage();
         const term = terminalPayload();
-        const showShot = !open && Boolean(image?.png?.length);
-        const showData = Boolean(term);
-        shotChip.visible = showShot;
-        dataPreview.visible = showData;
-        emptyCapture.visible = !open && !showShot && !showData;
-        captureAge.visible = !open && (showShot || showData);
-        if (showShot) {
-            shotToggle.active = decision(allow, 'screenshot', shotPermitId()) === 'allow';
+        const showData = !open && Boolean(term);
+        let showShot = false;
+        if (!open && image?.png?.length && shotLimits()) {
             const key = `${image.appId}:${image.timestamp}:${image.png.length}`;
-            if (key !== stripShotKey) {
-                try {
-                    shotThumb.paintable = previewTexture(image.png);
-                    shotThumb.visible = true;
+            try {
+                stripFit.png = image.png;
+                if (key !== stripShotKey)
+                    stripFit.key = '';
+                showShot = applyFitted(shotThumb, stripFit);
+                if (showShot)
                     stripShotKey = key;
-                } catch {
-                    shotThumb.visible = false;
-                }
+            } catch {
+                showShot = false;
             }
         }
-        if (showData) {
-            dataToggle.active = decision(allow, 'terminal', terminalKey()) === 'allow';
-            showDataText(term.text);
+        shotThumb.visible = showShot;
+        shotWrap.visible = showShot;
+        dataWrap.visible = showData;
+        contextScroll.visible = open;
+        contextShell.visible = true;
+        if (showShot) {
+            const on = decision(allow, 'screenshot', shotPermitId()) === 'allow';
+            shotToggle.active = on;
+            paintBadge(shotMark, on);
         }
-        if (captureAge.visible) {
-            const stamps = [];
-            if (image?.timestamp)
-                stamps.push(image.timestamp);
-            const dataStamp = dataAt.get(workingId) ?? 0;
-            if (dataStamp)
-                stamps.push(dataStamp);
-            const newest = stamps.length ? Math.max(...stamps) : 0;
-            captureAge.label = newest ? ageLabel((GLib.get_real_time() - newest) / 1e6) : '';
+        if (showData) {
+            const on = decision(allow, 'terminal', terminalKey()) === 'allow';
+            dataToggle.active = on;
+            paintBadge(dataMark, on);
+            showDataText(term.text);
         }
         updatingChecks = was;
     }
@@ -1020,10 +1423,10 @@ export function openWindow(application, services) {
             const key = `${image.appId}:${image.timestamp}:${image.png.length}`;
             if (key !== shotKey) {
                 try {
-                    shotPicture.paintable = previewTexture(image.png);
-                    shotPicture.visible = true;
+                    panelFit.png = image.png;
+                    panelFit.key = '';
+                    shotPicture.visible = applyFitted(shotPicture, panelFit);
                     shotKey = key;
-                    fitShot();
                 } catch {
                     shotPicture.visible = false;
                 }
@@ -1035,26 +1438,58 @@ export function openWindow(application, services) {
     }
 
     function refreshContext() {
-        if (contextPanel.visible)
+        if (contextButton.active)
             applyContextView();
         else
             updateSendStrip();
     }
 
-    function revealContext(force) {
+    function revealContext() {
         const keys = pendingAsk();
-        const fresh = keys.filter(key => !prompted.has(key));
         for (const key of keys)
             prompted.add(key);
-        if ((force || fresh.length) && keys.length) {
-            expandAsk(hostParts.expander, 'host');
-            expandAsk(packageParts.expander, 'packages');
-            expandAsk(graphicsParts.expander, 'graphics');
-            expandAsk(termParts.expander, `terminal:${terminalKey()}`);
-            expandAsk(actionParts.expander, 'terminalInstructions');
-            expandAsk(shotParts.expander, `screenshot:${shotPermitId()}`);
-        }
     }
+
+    function collapseContext() {
+        policyExpander.expanded = false;
+        hostParts.expander.expanded = false;
+        packageParts.expander.expanded = false;
+        graphicsParts.expander.expanded = false;
+        actionParts.expander.expanded = false;
+        termParts.expander.expanded = false;
+        shotParts.expander.expanded = false;
+    }
+
+    function fitContextDetail() {
+        if (!contextButton.active)
+            return;
+        const windowHeight = window.get_height();
+        const cap = Math.max(48, Math.floor(windowHeight * 0.5));
+        const width = Math.max(contextScroll.get_width(), 1);
+        const [, natural] = contextBody.measure(Gtk.Orientation.VERTICAL, width);
+        contextScroll.height_request = Math.max(1, Math.min(natural || cap, cap));
+    }
+
+    let detailKey = '';
+    contextShell.add_tick_callback(() => {
+        if (!contextButton.active)
+            return GLib.SOURCE_CONTINUE;
+        const flags = [
+            policyExpander,
+            hostParts.expander,
+            packageParts.expander,
+            graphicsParts.expander,
+            actionParts.expander,
+            termParts.expander,
+            shotParts.expander,
+        ].map(item => item.expanded ? '1' : '0').join('');
+        const key = `${window.get_height()}:${contextScroll.get_width()}:${flags}`;
+        if (key !== detailKey) {
+            detailKey = key;
+            fitContextDetail();
+        }
+        return GLib.SOURCE_CONTINUE;
+    });
 
     function storeDecision(kind, id, active) {
         if (kind !== 'host' && kind !== 'packages' && kind !== 'graphics' && kind !== 'terminalInstructions' && !id)
@@ -1119,16 +1554,25 @@ export function openWindow(application, services) {
         if (!workingId || workingId === ASSISTANT_ID) {
             setText(contextName, 'No app');
             showMethod('');
+            contextName.tooltip_text = 'No app';
+            methodLabel.tooltip_text = '';
             setText(contextAge, '');
+            contextAge.tooltip_text = '';
+            syncRunButtons();
             return;
         }
         setText(contextName, workingTitle || names.get(workingId) || workingId);
         if (nativeOn())
             showMethod('native');
-        else if (tmuxContext?.state?.type === 'terminal')
+        else if (tmuxContext?.state?.type === 'terminal') {
             showMethod('tmux');
-        else
+            if (errorText.label === 'Turn on agent support in this app.')
+                clearError();
+        } else
             showMethod('basic');
+        const fullName = `${contextName.label}${methodLabel.visible ? methodLabel.label : ''}`;
+        contextName.tooltip_text = fullName;
+        methodLabel.tooltip_text = fullName;
         const client = clients.contextFor(clientId());
         const shot = shots.get(workingId);
         if (!dataAt.get(workingId)) {
@@ -1140,16 +1584,26 @@ export function openWindow(application, services) {
         const stamp = dataAt.get(workingId) ?? 0;
         if (!stamp) {
             setText(contextAge, '');
-            return;
+            contextAge.tooltip_text = '';
+        } else {
+            const age = (GLib.get_real_time() - stamp) / 1e6;
+            setText(contextAge, ageLabel(age));
+            contextAge.tooltip_text = contextAge.label;
         }
-        const age = (GLib.get_real_time() - stamp) / 1e6;
-        setText(contextAge, ageLabel(age));
+        syncRunButtons();
     }
 
     function copyText(text) {
         const bytes = GLib.Bytes.new(new TextEncoder().encode(text));
         const provider = Gdk.ContentProvider.new_for_bytes('text/plain;charset=utf-8', bytes);
         window.get_clipboard().set_content(provider);
+    }
+
+    function copyPng(png) {
+        const stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(png));
+        const pixbuf = GdkPixbuf.Pixbuf.new_from_stream(stream, null);
+        const texture = Gdk.Texture.new_for_pixbuf(pixbuf);
+        window.get_clipboard().set_content(Gdk.ContentProvider.new_for_value(texture));
     }
 
     copyError.connect('clicked', () => copyText(errorText.label));
@@ -1172,10 +1626,34 @@ export function openWindow(application, services) {
         }
     }
 
-    function addCodeCard(parent, block) {
+    const runButtons = [];
+
+    function canRun() {
+        if (nativeOn())
+            return true;
+        return Boolean(tmuxContext?.paneId && tmuxContext.state?.type === 'terminal');
+    }
+
+    function syncRunButtons() {
+        const on = canRun();
+        for (const button of runButtons)
+            button.sensitive = on;
+    }
+
+    function dropRunButtons(root) {
+        for (let i = runButtons.length - 1; i >= 0; i -= 1) {
+            let node = runButtons[i];
+            while (node && node !== root)
+                node = node.get_parent();
+            if (node === root)
+                runButtons.splice(i, 1);
+        }
+    }
+
+    function addCodeCard(parent, block, commands) {
         const headerRow = new Gtk.Box({spacing: 6});
         headerRow.append(new Gtk.Label({
-            label: 'Command',
+            label: commands ? 'Command' : 'Code',
             xalign: 0,
             hexpand: true,
             css_classes: ['heading'],
@@ -1185,36 +1663,66 @@ export function openWindow(application, services) {
             tooltip_text: 'Copy',
             css_classes: ['flat'],
             valign: Gtk.Align.START,
+            sensitive: true,
         });
         headerRow.append(copyButton);
         parent.append(headerRow);
         copyButton.connect('clicked', () => copyText(block));
-        for (const unit of commandUnits(block)) {
-            const row = new Gtk.Box({spacing: 6});
+        if (!commands) {
+            const label = new Gtk.Label({
+                xalign: 0,
+                css_classes: ['monospace', 'md-code'],
+            });
+            setBody(label, block);
+            parent.append(label);
+            return;
+        }
+        const enabled = canRun();
+        const units = commandUnits(block);
+        for (const unit of units) {
             const view = new Gtk.Label({
                 xalign: 0,
                 hexpand: true,
-                css_classes: ['monospace', 'card'],
+                margin_start: 8,
+                margin_end: 36,
+                margin_top: 8,
+                margin_bottom: 8,
+                css_classes: ['monospace'],
             });
             setBody(view, unit);
             const run = new Gtk.Button({
-                label: 'Run',
-                valign: Gtk.Align.END,
+                child: new Gtk.Image({
+                    icon_name: 'media-playback-start-symbolic',
+                    pixel_size: 18,
+                }),
+                tooltip_text: 'Run',
+                css_classes: ['context-gear'],
+                halign: Gtk.Align.END,
+                valign: Gtk.Align.FILL,
+                width_request: 30,
+                sensitive: enabled,
             });
-            row.append(view);
-            row.append(run);
-            parent.append(row);
+            const shell = new Gtk.Overlay({
+                hexpand: true,
+                child: view,
+                css_classes: ['command-shell'],
+                overflow: Gtk.Overflow.HIDDEN,
+            });
+            shell.add_overlay(run);
+            parent.append(shell);
             run.connect('clicked', () => runCommand(unit));
+            runButtons.push(run);
         }
-        const allRow = new Gtk.Box({spacing: 6});
-        allRow.append(new Gtk.Box({hexpand: true}));
-        const runAll = new Gtk.Button({
-            label: 'Run All',
-            halign: Gtk.Align.END,
-        });
-        allRow.append(runAll);
-        parent.append(allRow);
-        runAll.connect('clicked', () => runCommand(block));
+        if (units.length > 1) {
+            const runAll = new Gtk.Button({
+                label: 'Run All',
+                halign: Gtk.Align.START,
+                sensitive: enabled,
+            });
+            parent.append(runAll);
+            runAll.connect('clicked', () => runCommand(block));
+            runButtons.push(runAll);
+        }
     }
 
     function addMarkupLabel(parent, markup, plain, cssClass) {
@@ -1263,17 +1771,8 @@ export function openWindow(application, services) {
             if (block.type === 'code') {
                 if (!block.text)
                     continue;
-                const terminal = clients.isActive(clientId());
-                if (terminal && (isTerminalAction(block.lang) || isShellLang(block.lang))) {
-                    addCodeCard(parent, block.text);
-                    continue;
-                }
-                const label = new Gtk.Label({
-                    xalign: 0,
-                    css_classes: ['monospace', 'md-code'],
-                });
-                setBody(label, block.text);
-                parent.append(label);
+                const commands = isTerminalAction(block.lang) || isShellLang(block.lang);
+                addCodeCard(parent, block.text, commands);
                 continue;
             }
             if (block.type === 'rule') {
@@ -1296,6 +1795,23 @@ export function openWindow(application, services) {
         return when ? when.format('%x %X') : '';
     }
 
+    function tokenText(count, kind) {
+        const number = Number(count);
+        if (!Number.isFinite(number))
+            return '';
+        return `${Math.round(number).toLocaleString('en-US')} ${kind}`;
+    }
+
+    function appendCaption(row, text) {
+        if (!text)
+            return;
+        row.append(new Gtk.Label({
+            label: text,
+            xalign: 0,
+            css_classes: ['dim-label', 'caption'],
+        }));
+    }
+
     function addMessageView(message) {
         const wrap = new Gtk.Box({
             orientation: Gtk.Orientation.VERTICAL,
@@ -1303,31 +1819,63 @@ export function openWindow(application, services) {
             css_classes: [message.role === 'user' ? 'user-message' : 'assistant-message'],
         });
         const titleRow = new Gtk.Box({spacing: 8});
-        titleRow.append(new Gtk.Label({
-            label: message.role === 'user' ? 'You' : 'Assistant',
-            xalign: 0,
-            css_classes: ['heading'],
-        }));
-        let stamp = '';
-        if (message.role === 'user' && message.sentAt)
-            stamp = sentLabel(message.sentAt);
-        if (message.role === 'assistant' && Number.isFinite(message.elapsedMs))
-            stamp = elapsedLabel(message.elapsedMs);
-        if (stamp) {
+        if (message.role === 'assistant') {
             titleRow.append(new Gtk.Label({
-                label: stamp,
+                label: 'AI',
                 xalign: 0,
-                css_classes: ['dim-label', 'caption'],
+                css_classes: ['heading'],
             }));
-        }
-        wrap.append(titleRow);
-        if (message.role !== 'assistant') {
+            if (Number.isFinite(message.elapsedMs))
+                appendCaption(titleRow, elapsedLabel(message.elapsedMs));
+            appendCaption(titleRow, tokenText(message.outputTokens, 'out'));
+            wrap.append(titleRow);
+            addMarkdown(wrap, message.text);
+        } else {
+            if (message.sentAt)
+                appendCaption(titleRow, sentLabel(message.sentAt));
+            appendCaption(titleRow, tokenText(message.inputTokens, 'in'));
+            if (titleRow.get_first_child())
+                wrap.append(titleRow);
             wrap.append(new Gtk.Label({xalign: 0}));
             setBody(wrap.get_last_child(), message.text);
-        } else {
-            addMarkdown(wrap, message.text);
         }
-        messageBox.append(wrap);
+        return wrap;
+    }
+
+    function messageChild(index) {
+        let child = messageBox.get_first_child();
+        for (let i = 0; child && i < index; i += 1)
+            child = child.get_next_sibling();
+        return child;
+    }
+
+    function appendMessage(message) {
+        messageBox.append(addMessageView(message));
+    }
+
+    function replaceMessage(index) {
+        const message = messages[index];
+        if (!message)
+            return;
+        const old = messageChild(index);
+        const prev = old ? old.get_prev_sibling() : null;
+        if (old) {
+            dropRunButtons(old);
+            messageBox.remove(old);
+        }
+        const wrap = addMessageView(message);
+        if (prev || messageBox.get_first_child())
+            messageBox.insert_child_after(wrap, prev);
+        else
+            messageBox.append(wrap);
+    }
+
+    function popMessageView() {
+        const last = messageBox.get_last_child();
+        if (!last)
+            return;
+        dropRunButtons(last);
+        messageBox.remove(last);
     }
 
     let followBottom = true;
@@ -1437,10 +1985,33 @@ export function openWindow(application, services) {
         stopPlaceTick();
     });
 
+    let streamPaint = 0;
+
+    function stopStreamPaint() {
+        if (!streamPaint)
+            return;
+        GLib.source_remove(streamPaint);
+        streamPaint = 0;
+    }
+
+    function queueStreamPaint() {
+        if (streamPaint)
+            return;
+        streamPaint = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            streamPaint = 0;
+            replaceMessage(messages.length - 1);
+            showChatUsage();
+            schedulePlace();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
     function redrawMessages() {
+        stopStreamPaint();
         if (!followBottom)
             savedValue = chatAdj.value;
         placing = true;
+        runButtons.length = 0;
         let child = messageBox.get_first_child();
         while (child) {
             const next = child.get_next_sibling();
@@ -1448,9 +2019,34 @@ export function openWindow(application, services) {
             child = next;
         }
         for (const message of messages)
-            addMessageView(message);
+            appendMessage(message);
         placing = false;
+        showChatUsage();
         schedulePlace();
+    }
+
+    function showChatUsage() {
+        let input = 0;
+        let output = 0;
+        let any = false;
+        for (const message of messages) {
+            if (message.role === 'user' && Number.isFinite(message.inputTokens)) {
+                input += message.inputTokens;
+                any = true;
+            } else if (message.role === 'assistant' && Number.isFinite(message.outputTokens)) {
+                output += message.outputTokens;
+                any = true;
+            }
+        }
+        if (!any) {
+            chatUsage.label = '';
+            chatUsage.tooltip_text = '';
+            chatUsage.visible = false;
+            return;
+        }
+        chatUsage.label = `${tokenText(input, 'in')}   ${tokenText(output, 'out')}   ${tokenText(input + output, 'total')}`;
+        chatUsage.tooltip_text = chatUsage.label;
+        chatUsage.visible = true;
     }
 
     function readWindows() {
@@ -1507,17 +2103,16 @@ export function openWindow(application, services) {
     }
 
     function adopt(appId) {
-        const changed = workingId !== appId;
         workingId = appId;
         workingTitle = names.get(appId) || appId;
         touchData(appId);
-        if (clients.isSupported(appId) && !clients.isActive(appId)
+        refreshTmux();
+        const tmuxOn = tmuxContext?.state?.type === 'terminal';
+        if (!tmuxOn && clients.isSupported(appId) && !clients.isActive(appId)
             && !clients.contextFor(appId)?.text?.trim?.())
             showError('Turn on agent support in this app.');
         else if (errorText.label === 'Turn on agent support in this app.')
             clearError();
-        if (changed)
-            redrawMessages();
     }
 
     function seedContext(windows) {
@@ -1651,6 +2246,23 @@ export function openWindow(application, services) {
         });
     }
 
+    function placeAfterMenu() {
+        const place = () => {
+            if (dock === 'off')
+                window.set_default_size(shownWidth(), LAUNCH_HEIGHT);
+            applyPlacement();
+        };
+        if (!menuPopover.get_visible()) {
+            place();
+            return;
+        }
+        const closed = menuPopover.connect('closed', () => {
+            menuPopover.disconnect(closed);
+            place();
+        });
+        menuPopover.popdown();
+    }
+
     aboveSwitch.connect('notify::active', () => {
         if (syncingDock)
             return;
@@ -1673,15 +2285,10 @@ export function openWindow(application, services) {
                 if (otherMode !== mode)
                     other.active = false;
             }
-            if (mode === 'off')
-                window.set_default_size(windowWidth || window.get_width() || 1, LAUNCH_HEIGHT);
-            applyPlacement();
+            placeAfterMenu();
         });
     }
 
-    modelBox.connect('notify::visible', () => {
-        appSpacer.visible = !modelBox.visible;
-    });
     function fitPolicy() {
         if (!policyExpander.expanded)
             return;
@@ -1776,7 +2383,7 @@ export function openWindow(application, services) {
             GLib.source_remove(splitSave);
         splitSave = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
             splitSave = 0;
-            saveLayout(splitPercent, colorScheme, widthSet ? windowWidth : 0);
+            persistLayout();
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -1802,16 +2409,26 @@ export function openWindow(application, services) {
     });
     split.connect('notify::height', () => applySplit());
     contextButton.connect('toggled', () => {
-        contextPanel.visible = contextButton.active;
-        splitReady = false;
+        const live = Math.round(window.get_width());
         if (contextButton.active) {
+            if (live > 1) {
+                windowWidth = live;
+                widthSet = true;
+            }
+            contextOpen = true;
+            persistLayout();
+            applyAppWidth(contextWidth);
+            collapseContext();
             applyContextView();
-            GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-                applySplit();
-                return GLib.SOURCE_REMOVE;
-            });
-        } else
+            fitContextDetail();
+        } else {
+            if (live > 1)
+                contextWidth = live;
+            contextOpen = false;
+            persistLayout();
+            applyAppWidth(windowWidth || live);
             updateSendStrip();
+        }
     });
     hostCheck.connect('toggled', () => {
         if (!updatingChecks)
@@ -1846,15 +2463,19 @@ export function openWindow(application, services) {
             storeDecision('terminal', terminalKey(), dataToggle.active);
     });
 
+    function signOut() {
+        chatgpt.signOut();
+        models = [];
+        model = '';
+        updateAccount();
+        clearError();
+    }
+
+    menuAccountButton.connect('clicked', () => {
+        accountOpen = !accountOpen;
+        updateAccount();
+    });
     signIn.connect('clicked', () => {
-        if (chatgpt.signedIn()) {
-            chatgpt.signOut();
-            models = [];
-            model = '';
-            updateAccount();
-            clearError();
-            return;
-        }
         signIn.sensitive = false;
         chatgpt.signIn().then(async () => {
             updateAccount();
@@ -1870,6 +2491,7 @@ export function openWindow(application, services) {
                 model = models[0].slug;
                 modelBox.selected = 0;
             }
+            syncModelTip();
             if (!messages.length)
                 loadOpenChat();
         }).catch(showError).finally(() => {
@@ -1877,10 +2499,15 @@ export function openWindow(application, services) {
             updateAccount();
         });
     });
+    signOutButton.connect('clicked', () => {
+        menuPopover.popdown();
+        signOut();
+    });
     modelBox.connect('notify::selected', () => {
         const item = models[modelBox.selected];
         if (item)
             model = item.slug;
+        syncModelTip();
     });
 
     let historyReady = !chatId;
@@ -1950,6 +2577,7 @@ export function openWindow(application, services) {
             turns: turnsFrom(messages),
         });
         saveChats(chatIndex);
+        syncChatTip();
         const legacy = Gio.File.new_for_path(GLib.build_filenamev([dataDir(), CHAT_FILE]));
         if (legacy.query_exists(null))
             legacy.delete(null);
@@ -1988,6 +2616,19 @@ export function openWindow(application, services) {
             chatList.remove(child);
             child = next;
         }
+        const newChat = new Gtk.Button({css_classes: ['flat']});
+        const newChatBox = new Gtk.Box({spacing: 8});
+        newChatBox.append(new Gtk.Label({
+            label: 'New Chat',
+            xalign: 0,
+            hexpand: true,
+        }));
+        newChat.child = newChatBox;
+        newChat.connect('clicked', () => {
+            chatPopover.popdown();
+            startNewChat().catch(showError);
+        });
+        chatList.append(newChat);
         if (!chatIndex.chats.length) {
             chatList.append(new Gtk.Label({
                 label: 'No chats yet.',
@@ -2000,6 +2641,7 @@ export function openWindow(application, services) {
             }));
             return;
         }
+        chatList.append(new Gtk.Separator());
         for (const chat of chatIndex.chats) {
             const row = new Gtk.Button({css_classes: ['flat']});
             const box = new Gtk.Box({spacing: 8});
@@ -2017,6 +2659,7 @@ export function openWindow(application, services) {
                 css_classes: ['dim-label'],
             }));
             row.child = box;
+            row.tooltip_text = chat.title;
             row.connect('clicked', () => {
                 chatPopover.popdown();
                 openSavedChat(chat.id).catch(showError);
@@ -2043,6 +2686,7 @@ export function openWindow(application, services) {
         saveChats(chatIndex);
         followBottom = true;
         redrawMessages();
+        syncChatTip();
     }
 
     async function startNewChat() {
@@ -2066,7 +2710,8 @@ export function openWindow(application, services) {
         clearCaptures();
         followBottom = true;
         redrawMessages();
-        menuPopover.popdown();
+        chatPopover.popdown();
+        syncChatTip();
         if (!stored)
             showError(new Error('ChatGPT cannot store chats for this sign-in. The new chat is open.'));
     }
@@ -2085,7 +2730,7 @@ export function openWindow(application, services) {
             if (button.child)
                 button.child.visible = on;
         }
-        saveLayout(splitPercent, colorScheme, widthSet ? windowWidth : 0);
+        persistLayout();
     }
 
     async function sendMessage() {
@@ -2106,7 +2751,7 @@ export function openWindow(application, services) {
             showError(new Error('No ChatGPT model is available.'));
             return;
         }
-        if (contextPanel.visible && pendingAsk().length) {
+        if (contextButton.active && pendingAsk().length) {
             const now = GLib.get_monotonic_time();
             if (!reviewHoldAt || now - reviewHoldAt < 500000) {
                 if (!reviewHoldAt)
@@ -2133,7 +2778,10 @@ export function openWindow(application, services) {
         const sentAt = Date.now();
         messages.push({role: 'user', text, sentAt});
         messages.push({role: 'assistant', text: ''});
-        redrawMessages();
+        appendMessage(messages[messages.length - 2]);
+        appendMessage(messages[messages.length - 1]);
+        showChatUsage();
+        schedulePlace();
         let prompt = text;
         if (sendTerm)
             prompt += `\n\n${term.head}\n\n\`\`\`\n${term.text}\n\`\`\``;
@@ -2151,17 +2799,27 @@ export function openWindow(application, services) {
         }));
         input.push({role: 'user', content: parts});
         try {
-            const reply = await chatgpt.streamReply({
+            const result = await chatgpt.streamReply({
                 model,
                 instructions: instructions(),
                 input,
                 onDelta: partial => {
                     messages[messages.length - 1].text = partial;
-                    redrawMessages();
+                    queueStreamPaint();
                 },
             });
+            const reply = result.text;
+            if (result.usage) {
+                messages[messages.length - 2].inputTokens = result.usage.input;
+                messages[messages.length - 1].outputTokens = result.usage.output;
+            }
             messages[messages.length - 1].text = reply;
             messages[messages.length - 1].elapsedMs = Date.now() - sentAt;
+            stopStreamPaint();
+            replaceMessage(messages.length - 2);
+            replaceMessage(messages.length - 1);
+            showChatUsage();
+            schedulePlace();
             if (sendHost)
                 lastSent.host = hostInfo;
             if (sendPackages)
@@ -2172,12 +2830,14 @@ export function openWindow(application, services) {
                 lastSent.terminal.set(terminalKey(), term.text);
             if (sendShot)
                 lastSent.screenshot.set(shotPermitId(), image.timestamp);
-            redrawMessages();
             refreshContext();
         } catch (error) {
             messages.pop();
             messages.pop();
-            redrawMessages();
+            popMessageView();
+            popMessageView();
+            showChatUsage();
+            schedulePlace();
             showError(error);
             return;
         } finally {
@@ -2195,8 +2855,9 @@ export function openWindow(application, services) {
     send.connect('clicked', () => {
         sendMessage().catch(showError);
     });
-    newChatButton.connect('clicked', () => {
-        startNewChat().catch(showError);
+    submitSwitch.connect('notify::active', () => {
+        submitCtrl = submitSwitch.active;
+        persistLayout();
     });
     for (const [name, button] of schemeButtons) {
         button.connect('toggled', () => {
@@ -2210,17 +2871,32 @@ export function openWindow(application, services) {
         });
     }
     chatPopover.connect('show', () => rebuildChatMenu());
+    menuPopover.connect('show', () => {
+        syncPlacement();
+        let frames = 0;
+        menuPopover.add_tick_callback(() => {
+            frames += 1;
+            for (const [, button] of dockButtons)
+                button.unset_state_flags(Gtk.StateFlags.ACTIVE | Gtk.StateFlags.PRELIGHT);
+            return frames < 2 ? GLib.SOURCE_CONTINUE : GLib.SOURCE_REMOVE;
+        });
+    });
     entry.buffer.connect('changed', () => {
         const [start, end] = entry.buffer.get_bounds();
         entryHint.visible = entry.buffer.get_text(start, end, false).length === 0;
+        fitEntry();
     });
     const key = new Gtk.EventControllerKey();
-    key.connect('key-pressed', (controller, keyval, keycode, state) => {
-        if (keyval === Gdk.KEY_Return && !(state & Gdk.ModifierType.SHIFT_MASK)) {
-            sendMessage().catch(showError);
-            return true;
-        }
-        return false;
+    key.connect('key-pressed', (_controller, keyval, _keycode, state) => {
+        if (keyval !== Gdk.KEY_Return && keyval !== Gdk.KEY_KP_Enter)
+            return false;
+        const shift = state & Gdk.ModifierType.SHIFT_MASK;
+        const ctrl = state & Gdk.ModifierType.CONTROL_MASK;
+        const sendNow = submitCtrl ? ctrl && !shift : !shift;
+        if (!sendNow)
+            return false;
+        sendMessage().catch(showError);
+        return true;
     });
     entry.add_controller(key);
 
@@ -2241,15 +2917,20 @@ export function openWindow(application, services) {
         if (widthSave)
             GLib.source_remove(widthSave);
         const liveWidth = window.get_width();
-        if (widthSet && liveWidth > 1)
-            windowWidth = liveWidth;
-        saveLayout(splitPercent, colorScheme, widthSet ? windowWidth : 0);
+        if (liveWidth > 1) {
+            if (contextOpen)
+                contextWidth = liveWidth;
+            else if (widthSet)
+                windowWidth = liveWidth;
+        }
+        persistLayout();
         if (placeIdle)
             GLib.source_remove(placeIdle);
         if (placementIdle)
             GLib.source_remove(placementIdle);
         if (dataScrollIdle)
             GLib.source_remove(dataScrollIdle);
+        stopStreamPaint();
         stopPlaceTick();
         shell.close();
         application.quit();
@@ -2257,15 +2938,23 @@ export function openWindow(application, services) {
     });
     function rememberWidth(width) {
         const next = Math.round(Number(width));
-        if (!acceptWidth || next < 1 || next === windowWidth)
+        if (!acceptWidth || ignoreWidth || next < 1)
             return;
-        windowWidth = next;
-        widthSet = true;
+        if (contextOpen) {
+            if (next === contextWidth)
+                return;
+            contextWidth = next;
+        } else {
+            if (next === windowWidth)
+                return;
+            windowWidth = next;
+            widthSet = true;
+        }
         if (widthSave)
             GLib.source_remove(widthSave);
         widthSave = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 400, () => {
             widthSave = 0;
-            saveLayout(splitPercent, colorScheme, windowWidth);
+            persistLayout();
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -2307,7 +2996,10 @@ export function openWindow(application, services) {
             modelBox.visible = models.length > 0;
             if (models[0])
                 model = models[0].slug;
+            syncModelTip();
         }).catch(showError);
     }
+    syncChatTip();
+    persistLayout();
     window.present();
 }

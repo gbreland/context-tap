@@ -2,9 +2,92 @@
   font-family: monospace;
 }
 
+.account-card {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background-color: color-mix(in srgb, @accent_bg_color 10%, @card_bg_color);
+}
+
+.chat-input-shell {
+  background-color: color-mix(in srgb, @accent_bg_color 16%, @card_bg_color);
+  border-radius: 12px;
+}
+
 textview.chat-input,
 textview.chat-input > text {
-  background-color: color-mix(in srgb, @accent_bg_color 16%, @card_bg_color);
+  background-color: transparent;
+}
+
+button.chat-send {
+  min-width: 30px;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: @accent_bg_color;
+  color: @accent_fg_color;
+  box-shadow: none;
+}
+
+button.chat-send:hover {
+  background: color-mix(in srgb, white 14%, @accent_bg_color);
+}
+
+button.chat-send:active {
+  background: color-mix(in srgb, black 16%, @accent_bg_color);
+}
+
+button.context-gear {
+  min-width: 30px;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: color-mix(in srgb, @accent_bg_color 48%, @card_bg_color);
+  color: @accent_fg_color;
+  box-shadow: none;
+}
+
+button.context-gear:hover,
+button.context-gear:checked {
+  background: color-mix(in srgb, @accent_bg_color 70%, @card_bg_color);
+}
+
+button.context-card {
+  min-height: 0;
+  padding: 4px;
+  margin: 0;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+}
+
+button.context-card:checked {
+  border-color: @accent_bg_color;
+  background: alpha(@accent_bg_color, 0.14);
+}
+
+button.context-card scrolledwindow,
+button.context-card textview,
+button.context-card textview > text {
+  background: transparent;
+}
+
+.context-mark {
+  min-width: 18px;
+  min-height: 18px;
+  border: 2px solid alpha(@window_fg_color, 0.4);
+  border-radius: 11px;
+  background: transparent;
+  color: @accent_fg_color;
+}
+
+.context-mark.on {
+  background: @accent_bg_color;
+  border-color: @accent_bg_color;
 }
 
 .user-message {
@@ -21,6 +104,11 @@ textview.chat-input > text {
   background: alpha(@window_fg_color, 0.08);
   border-radius: 8px;
   padding: 8px;
+}
+
+.command-shell {
+  background: alpha(@window_fg_color, 0.08);
+  border-radius: 8px;
 }
 
 .md-quote {
@@ -61,7 +149,14 @@ textview.chat-input > text {
 textview.data-preview,
 textview.data-preview > text {
   font-family: monospace;
+  font-size: 6.5pt;
   background: transparent;
+}
+
+textview.data-preview-tip,
+textview.data-preview-tip > text {
+  font-family: monospace;
+  font-size: 10pt;
 }
 
 .context-panel {
@@ -75,9 +170,9 @@ textview.data-preview > text {
   font-weight: bold;
 }
 
-.context-title {
-  font-size: 1.45em;
-  font-weight: bold;
+.context-detail {
+  font-family: monospace;
+  font-size: 6.5pt;
 }
 
 .style-circle {

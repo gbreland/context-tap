@@ -7,5 +7,4 @@ Terminal=false
 Type=Application
 Categories=Utility;
 StartupNotify=true
-DBusActivatable=true
 X-GNOME-UsesNotifications=true

@@ -129,6 +129,17 @@ export class ShellClient {
             null);
     }
 
+    setWidth(width) {
+        if (!this._proxy)
+            return;
+        this._proxy.call_sync(
+            'SetWidth',
+            new GLib.Variant('(i)', [Math.round(Number(width))]),
+            Gio.DBusCallFlags.NONE,
+            -1,
+            null);
+    }
+
     getPlacement() {
         if (!this._proxy)
             return null;
