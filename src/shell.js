@@ -140,6 +140,19 @@ export class ShellClient {
             null);
     }
 
+    focusSelf() {
+        if (!this._proxy)
+            return;
+        this._proxy.call(
+            'FocusSelf', null, Gio.DBusCallFlags.NONE, -1, null, (proxy, result) => {
+                try {
+                    proxy.call_finish(result);
+                } catch {
+                    /* FocusSelf loads after the next login. */
+                }
+            });
+    }
+
     getPlacement() {
         if (!this._proxy)
             return null;

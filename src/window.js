@@ -3,6 +3,7 @@ import Gdk from 'gi://Gdk?version=4.0';
 import GdkPixbuf from 'gi://GdkPixbuf';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Graphene from 'gi://Graphene';
 import Gtk from 'gi://Gtk?version=4.0';
 import Pango from 'gi://Pango';
 
@@ -77,6 +78,50 @@ function loadLayout() {
     }
 }
 
+function loadSavedPlacement() {
+    try {
+        const file = Gio.File.new_for_path(GLib.build_filenamev([
+            GLib.get_user_state_dir(), 'context-tap', 'placement.json']));
+        const [, bytes] = file.load_contents(null);
+        const data = JSON.parse(new TextDecoder().decode(bytes));
+        const mode = data.mode === 'left' || data.mode === 'right' ? data.mode : 'off';
+        return {mode, above: data.above === true};
+    } catch {
+        return {mode: 'off', above: false};
+    }
+}
+
+function shellOwned() {
+    try {
+        const [owned] = Gio.DBus.session.call_sync(
+            'org.freedesktop.DBus',
+            '/org/freedesktop/DBus',
+            'org.freedesktop.DBus',
+            'NameHasOwner',
+            new GLib.Variant('(s)', ['org.contexttap.ContextTap.Shell']),
+            new GLib.VariantType('(b)'),
+            Gio.DBusCallFlags.NONE,
+            -1,
+            null).deepUnpack();
+        return owned;
+    } catch {
+        return false;
+    }
+}
+
+function screenHeight() {
+    const monitors = Gdk.Display.get_default()?.get_monitors?.();
+    let height = 0;
+    if (monitors) {
+        for (let i = 0; i < monitors.get_n_items(); i++) {
+            const geo = monitors.get_item(i)?.get_geometry?.();
+            if (geo?.height > height)
+                height = geo.height;
+        }
+    }
+    return height > 200 ? height : LAUNCH_HEIGHT;
+}
+
 function saveLayout(percent, colorScheme, width = 0, submitCtrl = false, contextWidth = 0, contextOpen = false) {
     const scheme = colorScheme === 'light' || colorScheme === 'dark' ? colorScheme : 'default';
     const nextWidth = Math.round(Number(width));
@@ -117,8 +162,9 @@ export function openWindow(application, services) {
     let model = '';
     let workingId = '';
     let workingTitle = '';
-    let above = false;
-    let dock = 'off';
+    const savedPlace = shellOwned() ? loadSavedPlacement() : {mode: 'off', above: false};
+    let above = savedPlace.above;
+    let dock = savedPlace.mode;
     let syncingDock = false;
     let placementIdle = 0;
     let hostInfo = '';
@@ -200,9 +246,20 @@ export function openWindow(application, services) {
         application,
         title: 'Context Tap',
         default_width: Math.max(layout.width || 210, 210),
-        default_height: LAUNCH_HEIGHT,
+        default_height: dock === 'off' ? LAUNCH_HEIGHT : screenHeight(),
     });
     window.set_size_request(210, 200);
+    if (dock === 'left' || dock === 'right')
+        window.add_css_class('docked');
+    const focusClick = new Gtk.GestureClick({
+        button: 0,
+        propagation_phase: Gtk.PropagationPhase.CAPTURE,
+    });
+    focusClick.connect('pressed', () => {
+        if (!window.is_active)
+            shell.focusSelf();
+    });
+    window.add_controller(focusClick);
 
     const errorText = new Gtk.Label({
         xalign: 0,
@@ -941,7 +998,7 @@ export function openWindow(application, services) {
     });
     const aboveSwitch = new Gtk.Switch({
         valign: Gtk.Align.CENTER,
-        active: false,
+        active: above,
     });
     const aboveRow = new Gtk.Box({spacing: 12});
     aboveRow.append(new Gtk.Label({
@@ -975,7 +1032,7 @@ export function openWindow(application, services) {
             icon_name: iconName,
             tooltip_text: tip,
             css_classes: ['flat'],
-            active: mode === 'off',
+            active: mode === dock,
         });
         if (dockGroup)
             button.group = dockGroup;
@@ -1090,7 +1147,57 @@ export function openWindow(application, services) {
     const toolbar = new Adw.ToolbarView();
     toolbar.add_top_bar(header);
     toolbar.set_content(content);
-    window.set_content(toolbar);
+    const frame = new Gtk.Overlay();
+    frame.set_child(toolbar);
+    const resizeGrip = new Gtk.Box({
+        css_classes: ['panel-resize'],
+        can_target: true,
+        cursor: Gdk.Cursor.new_from_name(dock === 'right' ? 'w-resize' : 'e-resize', null),
+        halign: dock === 'right' ? Gtk.Align.START : Gtk.Align.END,
+        valign: Gtk.Align.FILL,
+        vexpand: true,
+        width_request: 8,
+        visible: dock === 'left' || dock === 'right',
+    });
+    // The window frame edge cannot resize a dock window, so this drag also claims that edge.
+    const resizeDrag = new Gtk.GestureDrag({
+        button: Gdk.BUTTON_PRIMARY,
+        propagation_phase: Gtk.PropagationPhase.CAPTURE,
+    });
+    let resizeStart = 0;
+    let resizeWanted = 0;
+    resizeDrag.connect('drag-begin', (gesture, x, y) => {
+        const [ok, point] = window.compute_point(frame, new Graphene.Point({x, y}));
+        const width = frame.get_width();
+        const onEdge = ok && (dock === 'right' ? point.x <= 8 : dock === 'left' && point.x >= width - 8);
+        if (!onEdge) {
+            gesture.set_state(Gtk.EventSequenceState.DENIED);
+            return;
+        }
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED);
+        resizeStart = window.get_width();
+        resizeWanted = resizeStart;
+    });
+    resizeDrag.connect('drag-update', (gesture, offsetX) => {
+        if (!gesture.is_active())
+            return;
+        const delta = dock === 'right' ? -offsetX : offsetX;
+        resizeWanted = Math.max(210, Math.round(resizeStart + delta));
+        try {
+            shell.setWidth(resizeWanted);
+        } catch {
+            /* The shell applies the width when it is connected. */
+        }
+    });
+    resizeDrag.connect('drag-end', () => {
+        if (resizeWanted)
+            rememberWidth(resizeWanted);
+        resizeWanted = 0;
+    });
+    window.add_controller(resizeDrag);
+    frame.add_overlay(resizeGrip);
+    window.set_content(frame);
+    syncDockClass();
 
     function showError(error) {
         errorText.label = error?.message ?? String(error);
@@ -1566,7 +1673,7 @@ export function openWindow(application, services) {
             showMethod('native');
         else if (tmuxContext?.state?.type === 'terminal') {
             showMethod('tmux');
-            if (errorText.label === 'Turn on agent support in this app.')
+            if (errorText.label === 'Turn on Tap support or tmux for better app integration')
                 clearError();
         } else
             showMethod('basic');
@@ -2110,8 +2217,8 @@ export function openWindow(application, services) {
         const tmuxOn = tmuxContext?.state?.type === 'terminal';
         if (!tmuxOn && clients.isSupported(appId) && !clients.isActive(appId)
             && !clients.contextFor(appId)?.text?.trim?.())
-            showError('Turn on agent support in this app.');
-        else if (errorText.label === 'Turn on agent support in this app.')
+            showError('Turn on Tap support or tmux for better app integration');
+        else if (errorText.label === 'Turn on Tap support or tmux for better app integration')
             clearError();
     }
 
@@ -2174,7 +2281,23 @@ export function openWindow(application, services) {
         }
     }
 
+    function syncShellControls() {
+        const up = shell.available();
+        dockBox.sensitive = up;
+        aboveRow.sensitive = up;
+        const tip = up ? null : 'Needs the Context Tap shell extension';
+        dockBox.tooltip_text = tip;
+        aboveRow.tooltip_text = tip;
+        if (up || (dock === 'off' && !above))
+            return;
+        dock = 'off';
+        above = false;
+        showPlacement();
+        window.set_default_size(shownWidth(), LAUNCH_HEIGHT);
+    }
+
     shell.onReady = () => {
+        syncShellControls();
         restorePlacement();
         refreshState();
     };
@@ -2203,6 +2326,17 @@ export function openWindow(application, services) {
         refreshContext();
     };
 
+    function syncDockClass() {
+        const docked = dock === 'left' || dock === 'right';
+        if (docked)
+            window.add_css_class('docked');
+        else
+            window.remove_css_class('docked');
+        resizeGrip.visible = docked;
+        resizeGrip.halign = dock === 'right' ? Gtk.Align.START : Gtk.Align.END;
+        resizeGrip.cursor = Gdk.Cursor.new_from_name(dock === 'right' ? 'w-resize' : 'e-resize', null);
+    }
+
     function showPlacement() {
         syncingDock = true;
         if (aboveSwitch.active !== above)
@@ -2213,6 +2347,7 @@ export function openWindow(application, services) {
                 button.active = on;
         }
         syncingDock = false;
+        syncDockClass();
     }
 
     function restorePlacement() {
@@ -2285,6 +2420,7 @@ export function openWindow(application, services) {
                 if (otherMode !== mode)
                     other.active = false;
             }
+            syncDockClass();
             placeAfterMenu();
         });
     }

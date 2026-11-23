@@ -1,4 +1,18 @@
 #!/bin/sh
 set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+
+if [ "${1:-}" = "--autostart" ]; then
+  shift
+  uuid=context-tap@context-tap
+  [ "$(gsettings get org.gnome.shell disable-user-extensions 2>/dev/null)" = "true" ] && exit 0
+  case "$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null)" in
+    *"'$uuid'"*) ;;
+    *) exit 0 ;;
+  esac
+  case "$(gsettings get org.gnome.shell disabled-extensions 2>/dev/null)" in
+    *"'$uuid'"*) exit 0 ;;
+  esac
+fi
+
 exec gjs -m "$root/src/main.js" "$@"

@@ -3,6 +3,6 @@
   "name": "Context Tap",
   "description": "Lists windows, captures an app when it gains focus, and docks Context Tap.",
   "shell-version": ["51"],
-  "url": "https://github.com/local/context-tap",
+  "url": "https://github.com/gbreland/context-tap",
   "version": 1
 }

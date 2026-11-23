@@ -2,6 +2,28 @@
   font-family: monospace;
 }
 
+.panel-resize {
+  min-width: 8px;
+  background: transparent;
+}
+
+.panel-resize:hover {
+  background: alpha(@accent_color, 0.35);
+}
+
+window.csd.docked,
+window.csd.docked.tiled,
+window.csd.docked.tiled-left,
+window.csd.docked.tiled-right,
+window.csd.docked.tiled-top,
+window.csd.docked.tiled-bottom,
+window.csd.docked:backdrop,
+window.csd.docked.tiled-left:backdrop,
+window.csd.docked.tiled-right:backdrop {
+  box-shadow: none;
+  margin: 0;
+}
+
 .account-card {
   padding: 10px 12px;
   border-radius: 12px;
@@ -135,10 +157,11 @@ button.context-card textview > text {
 .error-bar {
   background: alpha(@error_color, 0.16);
   border-radius: 12px;
+  padding: 4px 10px;
 }
 
 .error-text {
-  padding: 6px 0;
+  padding: 4px 0;
 }
 
 .data-preview {

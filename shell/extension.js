@@ -7,6 +7,7 @@ import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const ASSISTANT = 'org.contexttap.ContextTap';
 const LAUNCH_HEIGHT = 760;
@@ -46,6 +47,7 @@ const XML = `
     <method name="SetWidth">
       <arg type="i" name="width" direction="in"/>
     </method>
+    <method name="FocusSelf"/>
     <signal name="FocusChanged">
       <arg type="s" name="app_id"/>
       <arg type="s" name="title"/>
@@ -164,6 +166,28 @@ export default class GnomeAiAssistantExtension extends Extension {
                 this._releaseIfMoved(win, true);
         });
         this._schedulePlacement();
+        if (!Main.layoutManager._startingUp)
+            this._launchAssistant();
+    }
+
+    _launchAssistant() {
+        try {
+            const [owned] = Gio.DBus.session.call_sync(
+                'org.freedesktop.DBus',
+                '/org/freedesktop/DBus',
+                'org.freedesktop.DBus',
+                'NameHasOwner',
+                new GLib.Variant('(s)', [ASSISTANT]),
+                new GLib.VariantType('(b)'),
+                Gio.DBusCallFlags.NONE,
+                -1,
+                null).deepUnpack();
+            if (owned)
+                return;
+            Shell.AppSystem.get_default().lookup_app(`${ASSISTANT}.desktop`)?.activate();
+        } catch (error) {
+            console.error(`Context Tap could not start the app: ${error}`);
+        }
     }
 
     disable() {
@@ -193,11 +217,22 @@ export default class GnomeAiAssistantExtension extends Extension {
             GLib.source_remove(this._holdIdle);
             this._holdIdle = 0;
         }
+        if (this._pinIdle) {
+            GLib.source_remove(this._pinIdle);
+            this._pinIdle = 0;
+        }
         if (this._positionId && this._watched) {
             this._watched.disconnect(this._positionId);
             this._positionId = 0;
             this._watched = null;
         }
+        try {
+            for (const win of this._assistantWindows())
+                win.show_in_window_list();
+        } catch {
+            /* The window list is already gone. */
+        }
+        this._clearStrut();
         if (this._registration)
             this._connection.unregister_object(this._registration);
         this._registration = 0;
@@ -269,6 +304,9 @@ export default class GnomeAiAssistantExtension extends Extension {
             } else if (method === 'SetWidth') {
                 this._setWidth(params.deepUnpack()[0]);
                 invocation.return_value(new GLib.Variant('()', []));
+            } else if (method === 'FocusSelf') {
+                this._focusSelf();
+                invocation.return_value(new GLib.Variant('()', []));
             } else {
                 invocation.return_error_literal(
                     'org.freedesktop.DBus.Error.UnknownMethod', method);
@@ -337,9 +375,12 @@ export default class GnomeAiAssistantExtension extends Extension {
     }
 
     _isAssistant(win) {
-        return Boolean(win)
-            && win.get_window_type() === Meta.WindowType.NORMAL
-            && this._describe(win).appId === ASSISTANT;
+        if (!win)
+            return false;
+        const type = win.get_window_type();
+        if (type !== Meta.WindowType.NORMAL && type !== Meta.WindowType.DOCK)
+            return false;
+        return this._describe(win).appId === ASSISTANT;
     }
 
     _assistantWindows() {
@@ -348,12 +389,26 @@ export default class GnomeAiAssistantExtension extends Extension {
             .filter(win => this._isAssistant(win));
     }
 
-    _leaveOverview(win) {
+    _syncTaskbar(win) {
+        const panel = this._mode === 'left' || this._mode === 'right';
         try {
-            if (!win.is_skip_taskbar())
+            if (panel)
                 win.hide_from_window_list();
+            else
+                win.show_in_window_list();
         } catch (error) {
-            console.error(`Context Tap could not leave the overview: ${error}`);
+            console.error(`Context Tap could not update the task bar: ${error}`);
+        }
+        if (!panel)
+            return;
+        try {
+            const settings = new Gio.Settings({schema: 'org.gnome.shell'});
+            const id = `${ASSISTANT}.desktop`;
+            const favorites = settings.get_strv('favorite-apps');
+            if (favorites.includes(id))
+                settings.set_strv('favorite-apps', favorites.filter(item => item !== id));
+        } catch (error) {
+            console.error(`Context Tap could not leave the dash: ${error}`);
         }
     }
 
@@ -735,21 +790,21 @@ export default class GnomeAiAssistantExtension extends Extension {
         let found = false;
         for (const win of this._assistantWindows()) {
             found = true;
-            this._leaveOverview(win);
+            this._syncTaskbar(win);
             this._watch(win);
             if (this._above)
                 win.make_above();
             else
                 win.unmake_above();
             const docking = this._mode === 'left' || this._mode === 'right';
+            if (!docking) {
+                this._dockedRect = null;
+                this._clearStrut();
+            }
             if (docking) {
                 if (!this._freeOrigin)
                     this._freeOrigin = this._frameOf(win);
-                const area = win.get_work_area_current_monitor();
-                const width = chosenWidth(win, area);
-                const x = this._mode === 'left' ? area.x : area.x + area.width - width;
-                this._holdPlacement();
-                win.move_resize_frame(true, x, area.y, width, area.height);
+                this._placeDock(win);
                 continue;
             }
             if (!restoreSize)
@@ -775,7 +830,195 @@ export default class GnomeAiAssistantExtension extends Extension {
             this._holdPlacement();
             win.move_resize_frame(true, x, y, width, height);
         }
+        if (!found) {
+            this._dockedRect = null;
+            this._clearStrut();
+        }
         return found;
+    }
+
+    _dockSlot(win, wanted = null) {
+        const monitor = global.display.get_monitor_geometry(win.get_monitor());
+        if (!monitor || monitor.height < 1 || monitor.width < 1)
+            return null;
+        const top = this._panelInset(monitor);
+        const width = wanted
+            ? Math.min(Math.max(wanted, 210), Math.max(210, monitor.width))
+            : chosenWidth(win, monitor);
+        const x = this._mode === 'left' ? monitor.x : monitor.x + monitor.width - width;
+        return {
+            x,
+            y: monitor.y + top,
+            width,
+            height: Math.max(1, monitor.height - top),
+        };
+    }
+
+    _panelInset(monitor) {
+        try {
+            const panel = Main.panel;
+            if (!panel?.get_transformed_position)
+                return 0;
+            const [px, py] = panel.get_transformed_position();
+            const [pw, ph] = panel.get_transformed_size();
+            if (py <= monitor.y + 1 && px < monitor.x + monitor.width && px + pw > monitor.x)
+                return Math.max(0, Math.round(ph));
+        } catch {
+            /* The top bar is not available. */
+        }
+        return 0;
+    }
+
+    _placeDock(win, width = null) {
+        const slot = this._dockSlot(win, width);
+        if (!slot)
+            return;
+        const frame = win.get_frame_rect();
+        const ready = this._above
+            ? win.get_window_type() === Meta.WindowType.DOCK && this._strut
+            : win.get_window_type() !== Meta.WindowType.DOCK && !this._strut;
+        if (ready && frame.x === slot.x && frame.y === slot.y
+            && frame.width === slot.width && frame.height === slot.height)
+            return;
+        this._dockedRect = slot;
+        this._holdPlacement();
+        this._removeStrut();
+        this._forceNormal(win);
+        win.move_resize_frame(true, slot.x, slot.y, slot.width, slot.height);
+        this._settleTries = 0;
+        this._queueSettle(win);
+    }
+
+    _queueSettle(win) {
+        if (this._pinIdle)
+            GLib.source_remove(this._pinIdle);
+        this._pinIdle = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 60, () => {
+            this._pinIdle = 0;
+            this._settle(win);
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _settle(win) {
+        const slot = this._dockedRect;
+        if (!win || !slot || (this._mode !== 'left' && this._mode !== 'right'))
+            return;
+        const frame = win.get_frame_rect();
+        const placed = frame.x === slot.x && frame.y === slot.y
+            && frame.width === slot.width && frame.height === slot.height;
+        if (!placed && this._settleTries < 12) {
+            this._settleTries += 1;
+            this._holdPlacement();
+            this._forceNormal(win);
+            win.move_resize_frame(true, slot.x, slot.y, slot.width, slot.height);
+            this._queueSettle(win);
+            return;
+        }
+        if (!this._above)
+            return;
+        if (!placed) {
+            const monitor = global.display.get_monitor_geometry(win.get_monitor());
+            slot.width = frame.width;
+            slot.x = this._mode === 'left' ? monitor.x : monitor.x + monitor.width - frame.width;
+        }
+        this._setDockType(win);
+        this._syncStrut(win);
+    }
+
+    _syncStrut(win) {
+        const docked = this._mode === 'left' || this._mode === 'right';
+        const rect = this._dockedRect;
+        if (!this._above || !docked || !win || !rect) {
+            this._clearStrut();
+            return;
+        }
+        const monitor = global.display.get_monitor_geometry(win.get_monitor());
+        if (!monitor)
+            return;
+        const x = this._mode === 'left' ? monitor.x : monitor.x + monitor.width - rect.width;
+        if (!this._strut) {
+            this._strut = new Clutter.Actor({
+                reactive: false,
+                opacity: 0,
+                width: rect.width,
+                height: monitor.height,
+            });
+            Main.layoutManager.addChrome(this._strut, {affectsStruts: true});
+        }
+        this._strut.set_position(x, monitor.y);
+        this._strut.set_size(rect.width, monitor.height);
+    }
+
+    _forceNormal(win) {
+        try {
+            if (win.get_window_type() === Meta.WindowType.DOCK)
+                win.set_type(Meta.WindowType.NORMAL);
+        } catch (error) {
+            console.error(`Context Tap could not restore the window type: ${error}`);
+        }
+    }
+
+    _setDockType(win) {
+        try {
+            if (win.get_window_type() !== Meta.WindowType.DOCK)
+                win.set_type(Meta.WindowType.DOCK);
+        } catch (error) {
+            console.error(`Context Tap could not set the dock type: ${error}`);
+        }
+    }
+
+    _focusSelf() {
+        const time = global.display.get_current_time_roundtrip();
+        for (const win of this._assistantWindows()) {
+            if (!win.has_focus())
+                win.focus(time);
+        }
+    }
+
+    _pinDock(win) {
+        const rect = this._dockedRect;
+        if (!win || !rect || (this._mode !== 'left' && this._mode !== 'right'))
+            return;
+        const frame = win.get_frame_rect();
+        if (!frame)
+            return;
+        if (frame.x === rect.x && frame.y === rect.y
+            && frame.width === rect.width && frame.height === rect.height)
+            return;
+        this._placeDock(win, rect.width);
+    }
+
+    _removeStrut() {
+        if (!this._strut)
+            return;
+        Main.layoutManager.removeChrome(this._strut);
+        this._strut.destroy();
+        this._strut = null;
+    }
+
+    _clearStrut() {
+        if (this._pinIdle) {
+            GLib.source_remove(this._pinIdle);
+            this._pinIdle = 0;
+        }
+        this._removeStrut();
+        try {
+            for (const win of this._assistantWindows())
+                this._forceNormal(win);
+        } catch {
+            /* The window list is already gone. */
+        }
+    }
+
+    _resizeDock(win, width) {
+        const slot = this._dockSlot(win, width);
+        if (!slot)
+            return;
+        this._dockedRect = slot;
+        this._holdPlacement();
+        win.move_resize_frame(true, slot.x, slot.y, slot.width, slot.height);
+        if (this._above)
+            this._syncStrut(win);
     }
 
     _setWidth(width) {
@@ -785,21 +1028,20 @@ export default class GnomeAiAssistantExtension extends Extension {
             const area = win.get_work_area_current_monitor();
             if (!frame || !area)
                 continue;
-            const next = Math.min(requested, Math.max(1, area.width));
-            let x = frame.x;
-            let y = frame.y;
-            let height = frame.height;
+            const monitor = global.display.get_monitor_geometry(win.get_monitor()) || area;
+            const next = Math.min(requested, Math.max(210, monitor.width));
             if (this._mode === 'left' || this._mode === 'right') {
-                y = area.y;
-                height = area.height;
-                x = this._mode === 'left' ? area.x : area.x + area.width - next;
-            } else if (x + next > area.x + area.width) {
-                x = area.x + area.width - next;
+                this._resizeDock(win, next);
+                continue;
             }
+            let x = frame.x;
+            if (x + next > area.x + area.width)
+                x = area.x + area.width - next;
             if (x < area.x)
                 x = area.x;
             this._holdPlacement();
-            win.move_resize_frame(true, x, y, next, height);
+            this._clearStrut();
+            win.move_resize_frame(true, x, frame.y, next, frame.height);
         }
     }
 
@@ -824,21 +1066,35 @@ export default class GnomeAiAssistantExtension extends Extension {
     }
 
     _releaseIfMoved(win, fromUser = false) {
-        if ((!fromUser && this._holding) || (this._mode !== 'left' && this._mode !== 'right'))
+        if (this._mode !== 'left' && this._mode !== 'right')
+            return;
+        if (!fromUser && (this._holding || this._pinIdle))
             return;
         const frame = win.get_frame_rect();
-        const area = win.get_work_area_current_monitor();
-        if (!frame || !area)
+        const monitor = global.display.get_monitor_geometry(win.get_monitor());
+        if (!frame || !monitor)
             return;
-        const slack = 16;
-        const parked = this._mode === 'left'
-            ? frame.x <= area.x + slack
-            : frame.x + frame.width >= area.x + area.width - slack;
-        if (parked)
+        const slack = 48;
+        const nearEdge = this._mode === 'left'
+            ? frame.x <= monitor.x + slack
+            : frame.x + frame.width >= monitor.x + monitor.width - slack;
+        if (fromUser && !nearEdge) {
+            this._mode = 'off';
+            this._freeOrigin = this._frameOf(win);
+            savePlacement(this._mode, this._above);
+            this._clearStrut();
             return;
-        this._mode = 'off';
-        this._freeOrigin = this._frameOf(win);
-        savePlacement(this._mode, this._above);
+        }
+        if (fromUser && nearEdge && this._dockedRect) {
+            const top = this._panelInset(monitor);
+            this._dockedRect = {
+                x: this._mode === 'left' ? monitor.x : monitor.x + monitor.width - frame.width,
+                y: monitor.y + top,
+                width: frame.width,
+                height: Math.max(1, monitor.height - top),
+            };
+        }
+        this._pinDock(win);
     }
 }
 
