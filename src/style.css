@@ -35,6 +35,10 @@ window.csd.docked.tiled-right:backdrop {
   border-radius: 12px;
 }
 
+.context-strip {
+  min-height: 36px;
+}
+
 textview.chat-input,
 textview.chat-input > text {
   background-color: transparent;
@@ -110,6 +114,59 @@ button.context-card textview > text {
 .context-mark.on {
   background: @accent_bg_color;
   border-color: @accent_bg_color;
+}
+
+flowbox.chat-stats {
+  background: none;
+  border: none;
+}
+
+flowbox.chat-stats > flowboxchild {
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: none;
+  outline: none;
+}
+
+.cache-good {
+  color: @success_color;
+}
+
+button.cache-chip {
+  min-width: 0;
+  min-height: 0;
+  padding: 0 2px;
+  margin: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+}
+
+button.cache-chip:hover {
+  background: alpha(@window_fg_color, 0.08);
+}
+
+button.chart-button {
+  min-width: 0;
+  min-height: 0;
+  padding: 2px;
+  margin: 0;
+}
+
+progressbar.cache-bar trough,
+progressbar.cache-bar progress {
+  min-height: 8px;
+  border: none;
+  border-radius: 4px;
+}
+
+progressbar.cache-bar trough {
+  background-color: alpha(@window_fg_color, 0.16);
+}
+
+progressbar.cache-bar progress {
+  background-color: @success_color;
 }
 
 .user-message {
@@ -196,6 +253,10 @@ textview.data-preview-tip > text {
 .context-detail {
   font-family: monospace;
   font-size: 6.5pt;
+  color: @view_fg_color;
+  background-color: @view_bg_color;
+  border-radius: 8px;
+  padding: 6px;
 }
 
 .style-circle {

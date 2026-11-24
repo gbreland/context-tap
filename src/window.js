@@ -3,7 +3,9 @@ import Gdk from 'gi://Gdk?version=4.0';
 import GdkPixbuf from 'gi://GdkPixbuf';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import GObject from 'gi://GObject';
 import Graphene from 'gi://Graphene';
+import Gsk from 'gi://Gsk';
 import Gtk from 'gi://Gtk?version=4.0';
 import Pango from 'gi://Pango';
 
@@ -16,10 +18,117 @@ import {inlineMarkup, isShellLang, isTerminalAction, markdownBlocks, markupFor, 
 import {loadStanding, policyText, saveStanding} from './profile.js';
 import {contextForPid, sendToPane} from './tmux.js';
 
+const DESKTOP_ID = 'org.gnome.Desktop';
 const CHAT_FILE = 'chat.json';
 const LAYOUT_FILE = 'layout.json';
 const LAUNCH_HEIGHT = 760;
 const CONTEXT_WIDTH = 600;
+
+function widgetSize(widget) {
+    if (!widget)
+        return {w: 0, h: 0};
+    const [, size] = widget.get_preferred_size();
+    return {w: size?.width || 0, h: size?.height || 0};
+}
+
+function placeChild(child, x, y, width, height) {
+    if (!child || width < 1 || height < 1)
+        return;
+    const point = new Graphene.Point();
+    point.init(x, y);
+    let transform = new Gsk.Transform();
+    transform = transform.translate(point);
+    child.allocate(width, height, -1, transform);
+}
+
+const PromptHead = GObject.registerClass({
+}, class PromptHead extends Gtk.Widget {
+    _init(dateLabel, chip, copyButton) {
+        super._init({hexpand: true});
+        this._date = dateLabel || null;
+        this._chip = chip || null;
+        this._copy = copyButton;
+        if (this._date)
+            this._date.set_parent(this);
+        if (this._chip)
+            this._chip.set_parent(this);
+        this._copy.set_parent(this);
+    }
+
+    vfunc_get_request_mode() {
+        return Gtk.SizeRequestMode.HEIGHT_FOR_WIDTH;
+    }
+
+    vfunc_measure(orientation, forSize) {
+        const date = widgetSize(this._date);
+        const chip = widgetSize(this._chip);
+        const copy = widgetSize(this._copy);
+        const gap = 8;
+        const first = date.w + copy.w + (date.w && copy.w ? gap : 0);
+        const inline = first + (chip.w ? chip.w + gap : 0);
+        if (orientation === Gtk.Orientation.HORIZONTAL) {
+            const min = Math.max(first, chip.w);
+            return [min, Math.max(min, inline), -1, -1];
+        }
+        const width = forSize < 0 ? inline : forSize;
+        const wrap = chip.w > 0 && inline > width;
+        const row = Math.max(date.h, copy.h, wrap ? 0 : chip.h);
+        const height = wrap ? row + 2 + chip.h : Math.max(row, 1);
+        return [height, height, -1, -1];
+    }
+
+    vfunc_size_allocate(width, height, baseline) {
+        const date = widgetSize(this._date);
+        const chip = widgetSize(this._chip);
+        const copy = widgetSize(this._copy);
+        const gap = 8;
+        const inline = date.w + copy.w + (chip.w ? chip.w + gap * 2 : gap);
+        const wrap = chip.w > 0 && inline > width;
+        const row = Math.max(date.h, copy.h, wrap ? 0 : chip.h, 1);
+        const dateY = Math.max(0, Math.floor((row - date.h) / 2));
+        const copyY = Math.max(0, Math.floor((row - copy.h) / 2));
+        placeChild(this._date, 0, dateY, date.w, date.h);
+        placeChild(this._copy, Math.max(0, width - copy.w), copyY, copy.w, copy.h);
+        if (!this._chip)
+            return;
+        if (wrap)
+            placeChild(this._chip, 0, row + 2, Math.min(chip.w, width), chip.h);
+        else {
+            const chipY = Math.max(0, Math.floor((row - chip.h) / 2));
+            placeChild(this._chip, date.w + (date.w ? gap : 0), chipY, chip.w, chip.h);
+        }
+    }
+
+    vfunc_dispose() {
+        for (const child of [this._date, this._chip, this._copy]) {
+            if (child)
+                child.unparent();
+        }
+        this._date = null;
+        this._chip = null;
+        this._copy = null;
+        super.vfunc_dispose();
+    }
+});
+
+function chartGlyph() {
+    const area = new Gtk.DrawingArea({
+        content_width: 16,
+        content_height: 16,
+        can_target: false,
+    });
+    area.set_draw_func((widget, cr) => {
+        const rgba = widget.get_color();
+        cr.setSourceRGBA(rgba.red, rgba.green, rgba.blue, rgba.alpha);
+        const heights = [6, 11, 15];
+        for (let i = 0; i < heights.length; i += 1) {
+            const height = heights[i];
+            cr.rectangle(1 + (i * 5), 16 - height, 3, height);
+            cr.fill();
+        }
+    });
+    return area;
+}
 
 function naturalScroll(scroller) {
     const viewport = scroller.get_first_child();
@@ -87,25 +196,7 @@ function loadSavedPlacement() {
         const mode = data.mode === 'left' || data.mode === 'right' ? data.mode : 'off';
         return {mode, above: data.above === true};
     } catch {
-        return {mode: 'off', above: false};
-    }
-}
-
-function shellOwned() {
-    try {
-        const [owned] = Gio.DBus.session.call_sync(
-            'org.freedesktop.DBus',
-            '/org/freedesktop/DBus',
-            'org.freedesktop.DBus',
-            'NameHasOwner',
-            new GLib.Variant('(s)', ['org.contexttap.ContextTap.Shell']),
-            new GLib.VariantType('(b)'),
-            Gio.DBusCallFlags.NONE,
-            -1,
-            null).deepUnpack();
-        return owned;
-    } catch {
-        return false;
+        return {mode: 'left', above: true};
     }
 }
 
@@ -153,18 +244,21 @@ export function openWindow(application, services) {
     let contextOpen = false;
     let ignoreWidth = false;
     let widthSave = 0;
+    let applyWidthTimer = 0;
     let acceptWidth = false;
     let chatIndex = loadChats();
     let chatId = chatIndex.openId || '';
     let storedPairs = 0;
     let messages = chatId || chatIndex.skipLegacy ? [] : loadChat();
+    let cacheKey = GLib.uuid_string_random();
     let models = [];
     let model = '';
     let workingId = '';
     let workingTitle = '';
-    const savedPlace = shellOwned() ? loadSavedPlacement() : {mode: 'off', above: false};
+    const savedPlace = loadSavedPlacement();
     let above = savedPlace.above;
     let dock = savedPlace.mode;
+    let startupDock = true;
     let syncingDock = false;
     let placementIdle = 0;
     let hostInfo = '';
@@ -198,19 +292,32 @@ export function openWindow(application, services) {
     }
 
     function applyAppWidth(width) {
-        ignoreWidth = true;
-        const target = Math.max(200, Math.round(Number(width)) || 200);
-        try {
-            shell.setWidth(target);
-        } catch {
-            /* The shell applies the width when it is connected. */
+        if (applyWidthTimer) {
+            GLib.source_remove(applyWidthTimer);
+            applyWidthTimer = 0;
         }
-        const height = window.get_height();
-        if (height > 1)
-            window.set_default_size(target, height);
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
-            ignoreWidth = false;
-            rememberWidth(window.get_width());
+        ignoreWidth = true;
+        const target = Math.max(210, Math.round(Number(width)) || 210);
+        const push = () => {
+            try {
+                shell.setWidth(target);
+            } catch {
+                /* The shell applies the width when it is connected. */
+            }
+            const height = window.get_height();
+            if (height > 1)
+                window.set_default_size(target, height);
+        };
+        push();
+        applyWidthTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
+            push();
+            applyWidthTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 450, () => {
+                applyWidthTimer = 0;
+                ignoreWidth = false;
+                const live = Math.round(window.get_width());
+                rememberWidth(Math.abs(live - target) <= 16 ? live : target);
+                return GLib.SOURCE_REMOVE;
+            });
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -288,7 +395,7 @@ export function openWindow(application, services) {
     const messageBox = new Gtk.Box({
         orientation: Gtk.Orientation.VERTICAL,
         spacing: 12,
-        margin_top: 12,
+        margin_top: 20,
         margin_bottom: 12,
         margin_start: 12,
         margin_end: 12,
@@ -577,7 +684,7 @@ export function openWindow(application, services) {
         margin_end: 12,
         margin_bottom: 12,
         visible: true,
-        css_classes: ['chat-input-shell'],
+        css_classes: ['chat-input-shell', 'context-strip'],
         overflow: Gtk.Overflow.HIDDEN,
     });
     contextShell.append(contextItems);
@@ -614,18 +721,38 @@ export function openWindow(application, services) {
         });
     }
 
+    function byteText(count) {
+        const n = Math.max(0, Math.round(Number(count) || 0));
+        return `${n.toLocaleString('en-US')} bytes`;
+    }
+
+    function utf8Bytes(text) {
+        return new TextEncoder().encode(String(text ?? '')).length;
+    }
+
+    function showBytes(label, count) {
+        const next = byteText(count);
+        if (label.label !== next)
+            label.label = next;
+    }
+
     function sectionTitle(text) {
         const label = new Gtk.Label({
             label: text,
             xalign: 0,
-            hexpand: true,
             ellipsize: Pango.EllipsizeMode.END,
         });
+        const bytes = new Gtk.Label({
+            label: byteText(0),
+            xalign: 0,
+        });
         const copy = copyButton();
-        const box = new Gtk.Box({spacing: 4, hexpand: true});
+        const box = new Gtk.Box({spacing: 6, hexpand: true});
         box.append(label);
+        box.append(bytes);
+        box.append(new Gtk.Label({hexpand: true}));
         box.append(copy);
-        return {box, copy};
+        return {box, copy, bytes};
     }
 
     function copyButton() {
@@ -649,7 +776,7 @@ export function openWindow(application, services) {
         const row = new Gtk.Box({spacing: 6});
         row.append(check);
         row.append(expander);
-        return {row, expander, copy: header.copy};
+        return {row, expander, copy: header.copy, bytes: header.bytes};
     }
 
     const policyCheck = new Gtk.CheckButton({
@@ -730,7 +857,6 @@ export function openWindow(application, services) {
     actionParts.expander.child = actionBody;
     actionParts.copy.connect('clicked', () => copyText(actionBody.label));
     const actionSection = actionParts.row;
-    actionSection.visible = false;
 
     const shotCheck = new Gtk.CheckButton();
     const shotCaption = new Gtk.Label({
@@ -1125,20 +1251,73 @@ export function openWindow(application, services) {
         margin_top: 4,
         margin_bottom: 4,
     });
-    const chatRow = new Gtk.Box({spacing: 8});
-    const chatUsage = new Gtk.Label({
-        xalign: 1,
-        hexpand: true,
-        ellipsize: Pango.EllipsizeMode.END,
-        css_classes: ['dim-label', 'caption'],
+    const usageBox = new Gtk.Box({
+        spacing: 8,
+        halign: Gtk.Align.END,
+        valign: Gtk.Align.CENTER,
         visible: false,
     });
-    chatRow.append(chatButton);
-    chatRow.append(chatUsage);
+    const usageMain = new Gtk.Label({
+        xalign: 1,
+        selectable: true,
+        css_classes: ['dim-label', 'caption'],
+    });
+    const usageRatio = new Gtk.Label({
+        xalign: 1,
+        selectable: true,
+        visible: false,
+        css_classes: ['caption', 'cache-good'],
+    });
+    const sessionScroll = new Gtk.ScrolledWindow({
+        propagate_natural_width: true,
+        propagate_natural_height: true,
+        max_content_width: 360,
+        max_content_height: 420,
+        hscrollbar_policy: Gtk.PolicyType.NEVER,
+    });
+    const sessionPopover = new Gtk.Popover({
+        child: sessionScroll,
+        position: Gtk.PositionType.BOTTOM,
+        has_arrow: true,
+    });
+    const chartButton = new Gtk.Button({
+        child: chartGlyph(),
+        tooltip_text: 'Session',
+        css_classes: ['flat', 'chart-button'],
+        visible: false,
+    });
+    usageBox.append(usageMain);
+    usageBox.append(usageRatio);
+    usageBox.append(chartButton);
+    chartButton.connect('clicked', () => {
+        if (sessionPopover.visible) {
+            sessionPopover.popdown();
+            return;
+        }
+        fillSessionPopover();
+        openPopover(sessionPopover, chartButton);
+    });
+    const chatFlow = new Gtk.FlowBox({
+        selection_mode: Gtk.SelectionMode.NONE,
+        min_children_per_line: 1,
+        max_children_per_line: 2,
+        column_spacing: 8,
+        row_spacing: 2,
+        homogeneous: false,
+        activate_on_single_click: false,
+        focusable: false,
+        hexpand: true,
+        css_classes: ['chat-stats'],
+    });
+    chatFlow.insert(chatButton, -1);
+    chatFlow.insert(usageBox, -1);
+    const usageChild = chatFlow.get_child_at_index(1);
+    usageChild.hexpand = true;
+    usageChild.visible = false;
     const accountRow = new Gtk.Box({spacing: 8});
     accountRow.append(modelBox);
     appBar.append(accountRow);
-    appBar.append(chatRow);
+    appBar.append(chatFlow);
     content.append(contextRow);
     content.append(errorBar);
     content.append(appBar);
@@ -1387,17 +1566,30 @@ export function openWindow(application, services) {
         return terminalContext()?.context?.state?.type === 'terminal';
     }
 
-    function instructions() {
-        const parts = [standingText()];
-        if (terminalActionsOn() && decision(allow, 'terminalInstructions') === 'allow')
-            parts.push(TERMINAL_ACTION_TEXT);
-        if (hostInfo && decision(allow, 'host') === 'allow')
-            parts.push(hostInfo);
-        if (packageInfo && decision(allow, 'packages') === 'allow')
-            parts.push(`User-installed packages:\n${packageInfo}`);
+    function developerText() {
+        const parts = [
+            standingText(),
+            'When terminal_actions_available=true, executable commands must use the bash terminal-action format.',
+            'When terminal_actions_available=false, do not generate executable terminal-action blocks.',
+            TERMINAL_ACTION_TEXT,
+        ];
         if (graphicsInfo && decision(allow, 'graphics') === 'allow')
             parts.push(graphicsInfo);
-        return parts.join('\n\n');
+        if (hostInfo && decision(allow, 'host') === 'allow')
+            parts.push(hostInfo);
+        return parts.filter(Boolean).join('\n\n');
+    }
+
+    function requestFacts(actionsAvailable) {
+        let application = 'none';
+        if (workingId && workingId !== ASSISTANT_ID)
+            application = terminalActionsOn()
+                ? 'terminal'
+                : (workingTitle || names.get(workingId) || workingId);
+        return [
+            `application: ${application}`,
+            `terminal_actions_available: ${actionsAvailable ? 'true' : 'false'}`,
+        ].join('\n');
     }
 
     let updatingChecks = false;
@@ -1465,6 +1657,7 @@ export function openWindow(application, services) {
         shotWrap.visible = showShot;
         dataWrap.visible = showData;
         contextScroll.visible = open;
+        contextItems.height_request = -1;
         contextShell.visible = true;
         if (showShot) {
             const on = decision(allow, 'screenshot', shotPermitId()) === 'allow';
@@ -1490,6 +1683,7 @@ export function openWindow(application, services) {
             setBody(hostBody, factsError);
         else
             setBody(hostBody, hostInfo);
+        showBytes(hostParts.bytes, factsReady && !factsError ? utf8Bytes(hostInfo) : 0);
 
         packageCheck.sensitive = factsReady && !factsError && Boolean(packageInfo);
         packageCheck.active = decision(allow, 'packages') === 'allow';
@@ -1500,6 +1694,7 @@ export function openWindow(application, services) {
             setBody(packageBody, factsError);
         else
             setBody(packageBody, packageInfo);
+        showBytes(packageParts.bytes, factsReady && !factsError ? utf8Bytes(packageInfo) : 0);
 
         graphicsCheck.sensitive = factsReady && !factsError && Boolean(graphicsInfo);
         graphicsCheck.active = decision(allow, 'graphics') === 'allow';
@@ -1509,19 +1704,25 @@ export function openWindow(application, services) {
             setBody(graphicsBody, factsError);
         else
             setBody(graphicsBody, graphicsInfo);
+        showBytes(graphicsParts.bytes, factsReady && !factsError ? utf8Bytes(graphicsInfo) : 0);
 
         const instructionsOn = terminalActionsOn();
-        actionSection.visible = instructionsOn;
         actionCheck.sensitive = instructionsOn;
-        if (instructionsOn)
-            actionCheck.active = decision(allow, 'terminalInstructions') === 'allow';
+        actionCheck.active = instructionsOn && decision(allow, 'terminalInstructions') === 'allow';
+        actionParts.expander.sensitive = true;
+        actionParts.copy.sensitive = true;
         const term = terminalPayload();
+        const termShown = term ? `${term.head}\n\n${term.text}` : '';
         termSection.visible = true;
         termCheck.active = decision(allow, 'terminal', terminalKey()) === 'allow';
-        setBody(termBody, term ? `${term.head}\n\n${term.text}` : 'No terminal text yet.');
+        setBody(termBody, termShown || 'No terminal text yet.');
+        showBytes(actionParts.bytes, utf8Bytes(actionBody.label));
+        showBytes(termParts.bytes, utf8Bytes(termShown));
+        showBytes(policyTitle.bytes, utf8Bytes(standingText()));
 
         const image = imageForMessage();
         shotSection.visible = Boolean(image?.png?.length);
+        showBytes(shotParts.bytes, image?.png?.length ?? 0);
         if (image?.png?.length) {
             shotCheck.active = decision(allow, 'screenshot', shotPermitId()) === 'allow';
             setText(shotCaption, image.title
@@ -1897,16 +2098,136 @@ export function openWindow(application, services) {
         }
     }
 
-    function sentLabel(ms) {
-        const when = GLib.DateTime.new_from_unix_local(Math.floor(ms / 1000));
-        return when ? when.format('%x %X') : '';
+    function clockText(when) {
+        let hour = when.get_hour() % 12;
+        if (hour === 0)
+            hour = 12;
+        const minute = String(when.get_minute()).padStart(2, '0');
+        const second = String(when.get_second()).padStart(2, '0');
+        return `${hour}:${minute}:${second}`;
     }
 
-    function tokenText(count, kind) {
-        const number = Number(count);
+    function dateStamp(when) {
+        const month = String(when.get_month()).padStart(2, '0');
+        const day = String(when.get_day_of_month()).padStart(2, '0');
+        return `${month}/${day}/${when.get_year()}`;
+    }
+
+    function sameDay(left, right) {
+        return left.get_year() === right.get_year()
+            && left.get_day_of_year() === right.get_day_of_year();
+    }
+
+    function sentParts(ms) {
+        const when = GLib.DateTime.new_from_unix_local(Math.floor(Number(ms) / 1000));
+        if (!when)
+            return null;
+        const now = GLib.DateTime.new_now_local();
+        const yesterday = now.add_days(-1);
+        const clock = clockText(when);
+        const full = `${dateStamp(when)} ${clock}`;
+        let short = full;
+        if (sameDay(when, now))
+            short = `Today ${clock}`;
+        else if (yesterday && sameDay(when, yesterday))
+            short = `Yesterday ${clock}`;
+        return {short, full};
+    }
+
+    function sentView(message) {
+        if (!Number.isFinite(message?.sentAt))
+            return null;
+        if (!message.sentShort) {
+            const parts = sentParts(message.sentAt);
+            if (!parts)
+                return null;
+            message.sentShort = parts.short;
+            message.sentFull = parts.full;
+        }
+        return {short: message.sentShort, full: message.sentFull};
+    }
+
+    function tokenCountText(count) {
+        const number = Math.round(Number(count));
         if (!Number.isFinite(number))
             return '';
-        return `${Math.round(number).toLocaleString('en-US')} ${kind}`;
+        const sign = number < 0 ? '-' : '';
+        const value = Math.abs(number);
+        if (value < 1000)
+            return `${sign}${value}`;
+        let scale = 1e3;
+        let suffix = 'k';
+        if (value >= 1e9) {
+            scale = 1e9;
+            suffix = 'b';
+        } else if (value >= 1e6) {
+            scale = 1e6;
+            suffix = 'm';
+        }
+        const scaled = value / scale;
+        if (scaled >= 100)
+            return `${sign}${Math.floor(scaled)}${suffix}`;
+        return `${sign}${(Math.floor(scaled * 10) / 10).toFixed(1)}${suffix}`;
+    }
+
+    function ratioText(part, whole) {
+        if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0)
+            return '0%';
+        return `${(Math.round((part / whole) * 1000) / 10).toFixed(1)}%`;
+    }
+
+    function detailCount(count) {
+        const number = Math.round(Number(count));
+        if (!Number.isFinite(number))
+            return '';
+        return number.toLocaleString('en-US');
+    }
+
+    function percentNumber(part, whole) {
+        if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0)
+            return 0;
+        return Math.round((part / whole) * 100);
+    }
+
+    function percentText(part, whole) {
+        return `${percentNumber(part, whole)}%`;
+    }
+
+    function durationText(ms) {
+        const value = Number(ms);
+        if (!Number.isFinite(value) || value < 500)
+            return '0 seconds';
+        return elapsedLabel(value);
+    }
+
+    function usageDetail(input, output, cached) {
+        const lines = [];
+        if (Number.isFinite(input))
+            lines.push(`In ${detailCount(input)}`);
+        if (Number.isFinite(output))
+            lines.push(`Out ${detailCount(output)}`);
+        if (Number.isFinite(cached)) {
+            lines.push(`Cached ${detailCount(cached)}`);
+            lines.push(`Uncached ${detailCount(Math.max(0, input - cached))}`);
+            lines.push(`Cache Ratio ${ratioText(cached, input)}`);
+        }
+        return lines.join('\n');
+    }
+
+    function cacheAccount(message) {
+        const input = Number(message?.inputTokens);
+        const cached = Number(message?.cachedTokens);
+        const writes = Number(message?.cacheWriteTokens);
+        if (!Number.isFinite(input) || (!Number.isFinite(cached) && !Number.isFinite(writes)))
+            return null;
+        const read = Number.isFinite(cached) ? cached : 0;
+        const write = Number.isFinite(writes) ? writes : 0;
+        return {
+            input,
+            cached: read,
+            writes: write,
+            ordinary: Math.max(0, input - read - write),
+        };
     }
 
     function appendCaption(row, text) {
@@ -1915,8 +2236,24 @@ export function openWindow(application, services) {
         row.append(new Gtk.Label({
             label: text,
             xalign: 0,
+            selectable: true,
             css_classes: ['dim-label', 'caption'],
         }));
+    }
+
+    function promptCopyText(message) {
+        const lines = [];
+        const when = sentView(message);
+        if (when)
+            lines.push(when.full);
+        const account = cacheAccount(message);
+        const tokens = account
+            ? usageDetail(account.input, null, account.cached)
+            : usageDetail(message.inputTokens, null, null);
+        if (tokens)
+            lines.push(tokens);
+        lines.push(message.text ?? '');
+        return lines.join('\n');
     }
 
     function addMessageView(message) {
@@ -1934,15 +2271,33 @@ export function openWindow(application, services) {
             }));
             if (Number.isFinite(message.elapsedMs))
                 appendCaption(titleRow, elapsedLabel(message.elapsedMs));
-            appendCaption(titleRow, tokenText(message.outputTokens, 'out'));
+            if (Number.isFinite(message.outputTokens))
+                appendCaption(titleRow, `Out ${detailCount(message.outputTokens)}`);
             wrap.append(titleRow);
             addMarkdown(wrap, message.text);
         } else {
-            if (message.sentAt)
-                appendCaption(titleRow, sentLabel(message.sentAt));
-            appendCaption(titleRow, tokenText(message.inputTokens, 'in'));
-            if (titleRow.get_first_child())
-                wrap.append(titleRow);
+            const account = cacheAccount(message);
+            const when = sentView(message);
+            let dateLabel = null;
+            if (when) {
+                dateLabel = new Gtk.Label({
+                    label: when.short,
+                    tooltip_text: when.full,
+                    xalign: 0,
+                    selectable: true,
+                    css_classes: ['dim-label', 'caption'],
+                });
+            }
+            const tokenLabel = account ? cacheChip(message, when) : null;
+            const copyPrompt = new Gtk.Button({
+                icon_name: 'edit-copy-symbolic',
+                tooltip_text: 'Copy',
+                css_classes: ['flat'],
+                valign: Gtk.Align.CENTER,
+            });
+            copyPrompt.connect('clicked', () => copyText(promptCopyText(message)));
+            titleRow.append(new PromptHead(dateLabel, tokenLabel, copyPrompt));
+            wrap.append(titleRow);
             wrap.append(new Gtk.Label({xalign: 0}));
             setBody(wrap.get_last_child(), message.text);
         }
@@ -2132,28 +2487,265 @@ export function openWindow(application, services) {
         schedulePlace();
     }
 
-    function showChatUsage() {
+    function replyAfter(message) {
+        const index = messages.indexOf(message);
+        const next = index >= 0 ? messages[index + 1] : null;
+        return next && next.role === 'assistant' ? next : null;
+    }
+
+    function cacheTrack(cached, input) {
+        const whole = Number(input);
+        const part = Number(cached);
+        const fraction = whole > 0 ? Math.min(1, Math.max(0, part / whole)) : 0;
+        return new Gtk.ProgressBar({
+            fraction,
+            hexpand: true,
+            valign: Gtk.Align.CENTER,
+            css_classes: ['cache-bar'],
+        });
+    }
+
+    function statRow(name, value) {
+        const row = new Gtk.Box({spacing: 12});
+        row.append(new Gtk.Label({
+            label: name,
+            xalign: 0,
+            hexpand: true,
+            css_classes: ['dim-label'],
+        }));
+        row.append(new Gtk.Label({
+            label: String(value),
+            xalign: 1,
+            selectable: true,
+        }));
+        return row;
+    }
+
+    function cacheChip(message, when) {
+        const account = cacheAccount(message);
+        if (!account)
+            return null;
+        const good = percentNumber(account.cached, account.input) >= 80;
+        const box = new Gtk.Box({spacing: 4});
+        if (good) {
+            box.append(new Gtk.Image({
+                icon_name: 'object-select-symbolic',
+                css_classes: ['cache-good'],
+            }));
+        }
+        box.append(new Gtk.Label({
+            label: `${percentText(account.cached, account.input)} cached`,
+            css_classes: good ? ['caption', 'cache-good'] : ['caption', 'dim-label'],
+        }));
+        const popover = new Gtk.Popover({
+            position: Gtk.PositionType.BOTTOM,
+            has_arrow: true,
+        });
+        const button = new Gtk.Button({
+            child: box,
+            css_classes: ['flat', 'cache-chip'],
+            hexpand: false,
+            halign: Gtk.Align.START,
+        });
+        button.connect('clicked', () => {
+            if (popover.visible) {
+                popover.popdown();
+                return;
+            }
+            popover.set_child(promptStats(message, when));
+            openPopover(popover, button);
+        });
+        button.connect('unrealize', () => {
+            popover.popdown();
+            if (popover.get_parent())
+                popover.unparent();
+        });
+        return button;
+    }
+
+    function openPopover(popover, widget) {
+        if (popover.get_parent() !== window)
+            popover.set_parent(window);
+        const found = widget.compute_bounds(window);
+        const bounds = found?.[1];
+        if (found?.[0] && bounds) {
+            const x = typeof bounds.get_x === 'function' ? bounds.get_x() : bounds.x;
+            const y = typeof bounds.get_y === 'function' ? bounds.get_y() : bounds.y;
+            const width = typeof bounds.get_width === 'function' ? bounds.get_width() : bounds.width;
+            const height = typeof bounds.get_height === 'function' ? bounds.get_height() : bounds.height;
+            popover.set_pointing_to(new Gdk.Rectangle({
+                x: Math.round(x),
+                y: Math.round(y),
+                width: Math.max(1, Math.round(width)),
+                height: Math.max(1, Math.round(height)),
+            }));
+        }
+        popover.position = Gtk.PositionType.BOTTOM;
+        popover.popup();
+    }
+
+    function promptStats(message, when) {
+        const account = cacheAccount(message);
+        const input = account ? account.input : Number(message.inputTokens);
+        const cached = account ? account.cached : 0;
+        const reply = replyAfter(message);
+        const output = Number(reply?.outputTokens);
+        const box = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: 8,
+            margin_top: 12,
+            margin_bottom: 12,
+            margin_start: 12,
+            margin_end: 12,
+            width_request: 240,
+        });
+        box.append(new Gtk.Label({
+            label: when ? when.short : '',
+            tooltip_text: when ? when.full : '',
+            xalign: 0,
+            css_classes: ['dim-label'],
+        }));
+        box.append(new Gtk.Label({
+            label: `${ratioText(cached, input)} input cached`,
+            xalign: 0,
+            css_classes: ['title-2', 'cache-good'],
+        }));
+        box.append(cacheTrack(cached, input));
+        box.append(statRow('Input', detailCount(input)));
+        box.append(statRow('Cached', detailCount(cached)));
+        box.append(statRow('Uncached', detailCount(Math.max(0, input - cached))));
+        box.append(statRow('Output', Number.isFinite(output) ? detailCount(output) : '0'));
+        box.append(statRow('Thinking', durationText(reply?.elapsedMs)));
+        return box;
+    }
+
+    function chatTotals() {
         let input = 0;
         let output = 0;
+        let cached = 0;
+        let thinking = 0;
         let any = false;
+        let hasCache = false;
         for (const message of messages) {
             if (message.role === 'user' && Number.isFinite(message.inputTokens)) {
                 input += message.inputTokens;
                 any = true;
-            } else if (message.role === 'assistant' && Number.isFinite(message.outputTokens)) {
-                output += message.outputTokens;
-                any = true;
+                const account = cacheAccount(message);
+                if (account) {
+                    hasCache = true;
+                    cached += account.cached;
+                }
+            } else if (message.role === 'assistant') {
+                if (Number.isFinite(message.outputTokens)) {
+                    output += message.outputTokens;
+                    any = true;
+                }
+                if (Number.isFinite(message.elapsedMs))
+                    thinking += message.elapsedMs;
             }
         }
-        if (!any) {
-            chatUsage.label = '';
-            chatUsage.tooltip_text = '';
-            chatUsage.visible = false;
+        return {input, output, cached, thinking, any, hasCache};
+    }
+
+    function sessionLength() {
+        let start = 0;
+        let end = 0;
+        for (let i = 0; i < messages.length; i += 1) {
+            const message = messages[i];
+            if (message.role !== 'user' || !Number.isFinite(message.sentAt))
+                continue;
+            if (!start)
+                start = message.sentAt;
+            const reply = messages[i + 1];
+            const replyEnd = reply && reply.role === 'assistant' && Number.isFinite(reply.elapsedMs)
+                ? message.sentAt + reply.elapsedMs
+                : message.sentAt;
+            if (replyEnd > end)
+                end = replyEnd;
+        }
+        return end > start ? end - start : 0;
+    }
+
+    function fillSessionPopover() {
+        const totals = chatTotals();
+        const box = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: 8,
+            margin_top: 12,
+            margin_bottom: 12,
+            margin_start: 12,
+            margin_end: 12,
+            width_request: 300,
+        });
+        box.append(new Gtk.Label({
+            label: 'Session',
+            xalign: 0,
+            css_classes: ['heading'],
+        }));
+        box.append(new Gtk.Label({
+            label: `${ratioText(totals.cached, totals.input)} input cached`,
+            xalign: 0,
+            css_classes: ['title-2', 'cache-good'],
+        }));
+        box.append(cacheTrack(totals.cached, totals.input));
+        box.append(statRow('Input', detailCount(totals.input)));
+        box.append(statRow('Cached', detailCount(totals.cached)));
+        box.append(statRow('Uncached', detailCount(Math.max(0, totals.input - totals.cached))));
+        box.append(statRow('Output', detailCount(totals.output)));
+        box.append(statRow('Cache ratio', ratioText(totals.cached, totals.input)));
+        box.append(statRow('Thinking', durationText(totals.thinking)));
+        box.append(statRow('Session', durationText(sessionLength())));
+        for (const message of messages) {
+            if (message.role !== 'user' || !Number.isFinite(message.inputTokens))
+                continue;
+            const account = cacheAccount(message);
+            const input = account ? account.input : message.inputTokens;
+            const cached = account ? account.cached : 0;
+            const when = sentView(message);
+            const row = new Gtk.Box({spacing: 8});
+            row.append(new Gtk.Label({
+                label: when ? when.short : '',
+                tooltip_text: when ? when.full : '',
+                xalign: 0,
+                css_classes: ['caption', 'dim-label'],
+            }));
+            row.append(cacheTrack(cached, input));
+            row.append(new Gtk.Label({
+                label: percentText(cached, input),
+                xalign: 1,
+                css_classes: ['caption'],
+            }));
+            box.append(row);
+        }
+        sessionScroll.child = box;
+    }
+
+    function showChatUsage() {
+        const totals = chatTotals();
+        if (!totals.any) {
+            usageMain.label = '';
+            usageMain.tooltip_text = '';
+            usageRatio.label = '';
+            usageRatio.tooltip_text = '';
+            usageRatio.visible = false;
+            usageBox.tooltip_text = '';
+            usageBox.visible = false;
+            chartButton.visible = false;
+            usageChild.visible = false;
             return;
         }
-        chatUsage.label = `${tokenText(input, 'in')}   ${tokenText(output, 'out')}   ${tokenText(input + output, 'total')}`;
-        chatUsage.tooltip_text = chatUsage.label;
-        chatUsage.visible = true;
+        const tip = usageDetail(totals.input, totals.output, totals.hasCache ? totals.cached : null);
+        usageMain.label = `${tokenCountText(totals.input)} in · ${tokenCountText(totals.output)} out`;
+        usageMain.tooltip_text = tip;
+        usageBox.tooltip_text = tip;
+        usageRatio.visible = totals.hasCache;
+        if (totals.hasCache) {
+            usageRatio.label = `${percentText(totals.cached, totals.input)} cached`;
+            usageRatio.tooltip_text = tip;
+        }
+        usageBox.visible = true;
+        chartButton.visible = true;
+        usageChild.visible = true;
     }
 
     function readWindows() {
@@ -2222,9 +2814,36 @@ export function openWindow(application, services) {
             clearError();
     }
 
+    function liveApps(windows) {
+        return windows.filter(item =>
+            item.appId && item.appId !== ASSISTANT_ID && item.appId !== DESKTOP_ID);
+    }
+
+    function useDesktop() {
+        const current = shots.get(DESKTOP_ID);
+        const shot = shell.getCapture(DESKTOP_ID);
+        if (shot?.png?.length && shot.timestamp !== current?.timestamp)
+            rememberShot(DESKTOP_ID, shot);
+        if (workingId !== DESKTOP_ID)
+            adopt(DESKTOP_ID);
+    }
+
     function seedContext(windows) {
         if (workingId || shell.missing())
             return;
+        if (liveApps(windows).length === 0) {
+            useDesktop();
+            return;
+        }
+        const focused = windows.find(item =>
+            item.focused && item.appId && item.appId !== ASSISTANT_ID && item.appId !== DESKTOP_ID);
+        if (focused) {
+            rememberShot(
+                focused.appId,
+                shell.captureNow(focused.appId) || shell.getCapture(focused.appId));
+            adopt(focused.appId);
+            return;
+        }
         let bestId = '';
         let bestTs = 0;
         for (const item of windows) {
@@ -2246,7 +2865,9 @@ export function openWindow(application, services) {
     function refreshState() {
         clients.refresh();
         const windows = readWindows();
-        if (windows && workingId && !windows.some(item => item.appId === workingId))
+        if (windows && liveApps(windows).length === 0)
+            useDesktop();
+        else if (windows && workingId && !windows.some(item => item.appId === workingId))
             workingId = '';
         if (windows)
             seedContext(windows);
@@ -2256,6 +2877,8 @@ export function openWindow(application, services) {
     }
 
     function syncPlacement() {
+        if (startupDock)
+            return;
         let saved = null;
         try {
             saved = shell.getPlacement();
@@ -2274,8 +2897,11 @@ export function openWindow(application, services) {
     }
 
     function applyPlacement() {
+        if (!shell.available())
+            return;
         try {
             shell.setPlacement(dock, above);
+            startupDock = false;
         } catch (error) {
             showError(error);
         }
@@ -2288,7 +2914,7 @@ export function openWindow(application, services) {
         const tip = up ? null : 'Needs the Context Tap shell extension';
         dockBox.tooltip_text = tip;
         aboveRow.tooltip_text = tip;
-        if (up || (dock === 'off' && !above))
+        if (up || startupDock || (dock === 'off' && !above))
             return;
         dock = 'off';
         above = false;
@@ -2308,7 +2934,10 @@ export function openWindow(application, services) {
         readWindows();
         const contextId = appId === ASSISTANT_ID ? previous : appId;
         if (contextId && contextId !== ASSISTANT_ID) {
-            rememberShot(contextId, shell.captureNow(contextId) || shell.getCapture(contextId));
+            const shot = contextId === DESKTOP_ID
+                ? shell.getCapture(contextId)
+                : (shell.captureNow(contextId) || shell.getCapture(contextId));
+            rememberShot(contextId, shot);
             adopt(contextId);
         }
         updateContextRow();
@@ -2351,6 +2980,11 @@ export function openWindow(application, services) {
     }
 
     function restorePlacement() {
+        if (startupDock) {
+            showPlacement();
+            queuePlacement();
+            return;
+        }
         let saved = null;
         try {
             saved = shell.getPlacement();
@@ -2468,6 +3102,7 @@ export function openWindow(application, services) {
     });
     policyView.connect('notify::width', () => schedulePolicyFit());
     policyBuffer.connect('changed', () => {
+        showBytes(policyTitle.bytes, utf8Bytes(standingText()));
         schedulePolicyFit();
         if (standingSave)
             GLib.source_remove(standingSave);
@@ -2558,12 +3193,14 @@ export function openWindow(application, services) {
             applyContextView();
             fitContextDetail();
         } else {
+            const restore = windowWidth > 1 ? windowWidth : live;
             if (live > 1)
                 contextWidth = live;
+            ignoreWidth = true;
             contextOpen = false;
             persistLayout();
-            applyAppWidth(windowWidth || live);
             updateSendStrip();
+            applyAppWidth(restore);
         }
     });
     hostCheck.connect('toggled', () => {
@@ -2815,6 +3452,7 @@ export function openWindow(application, services) {
         const items = await chatgpt.listItems(id);
         const record = chatIndex.chats.find(row => row.id === id);
         messages = zipMessages(items, record?.turns ?? []);
+        cacheKey = GLib.uuid_string_random();
         chatId = id;
         storedPairs = countPairs(messages);
         historyReady = true;
@@ -2837,6 +3475,7 @@ export function openWindow(application, services) {
         loadGen += 1;
         chatId = '';
         messages = [];
+        cacheKey = GLib.uuid_string_random();
         storedPairs = 0;
         historyReady = true;
         chatIndex.openId = '';
@@ -2918,7 +3557,12 @@ export function openWindow(application, services) {
         appendMessage(messages[messages.length - 1]);
         showChatUsage();
         schedulePlace();
-        let prompt = text;
+        const actionsAvailable = terminalActionsOn()
+            && decision(allow, 'terminalInstructions') === 'allow';
+        const context = [];
+        if (sendPackages)
+            context.push(`User-installed packages:\n${packageInfo}`);
+        let prompt = [text, ...context].filter(Boolean).join('\n\n');
         if (sendTerm)
             prompt += `\n\n${term.head}\n\n\`\`\`\n${term.text}\n\`\`\``;
         const parts = [{type: 'input_text', text: prompt}];
@@ -2929,16 +3573,19 @@ export function openWindow(application, services) {
             });
             parts[0].text += `\n\nScreenshot of ${image.title} at ${image.timestamp}.`;
         }
-        const input = messages.slice(0, -2).map(message => ({
-            role: message.role,
-            content: message.text,
-        }));
+        parts[0].text += `\n\n${requestFacts(actionsAvailable)}`;
+        messages[messages.length - 2].sentText = parts[0].text;
+        const input = [{role: 'developer', content: developerText()}];
+        for (const message of messages.slice(0, -2)) {
+            const text = message.role === 'user' ? (message.sentText || message.text) : message.text;
+            input.push({role: message.role, content: text});
+        }
         input.push({role: 'user', content: parts});
         try {
             const result = await chatgpt.streamReply({
                 model,
-                instructions: instructions(),
                 input,
+                cacheKey,
                 onDelta: partial => {
                     messages[messages.length - 1].text = partial;
                     queueStreamPaint();
@@ -2946,7 +3593,12 @@ export function openWindow(application, services) {
             });
             const reply = result.text;
             if (result.usage) {
-                messages[messages.length - 2].inputTokens = result.usage.input;
+                const sent = messages[messages.length - 2];
+                sent.inputTokens = result.usage.input;
+                if (result.usage.cached != null)
+                    sent.cachedTokens = result.usage.cached;
+                if (result.usage.cacheWrite != null)
+                    sent.cacheWriteTokens = result.usage.cacheWrite;
                 messages[messages.length - 1].outputTokens = result.usage.output;
             }
             messages[messages.length - 1].text = reply;
@@ -2974,6 +3626,10 @@ export function openWindow(application, services) {
             popMessageView();
             showChatUsage();
             schedulePlace();
+            const [boxStart, boxEnd] = buffer.get_bounds();
+            if (!buffer.get_text(boxStart, boxEnd, false).trim())
+                buffer.set_text(text, -1);
+            entry.grab_focus();
             showError(error);
             return;
         } finally {
@@ -3035,6 +3691,10 @@ export function openWindow(application, services) {
         return true;
     });
     entry.add_controller(key);
+    window.connect('notify::is-active', () => {
+        if (window.is_active && !window.get_focus())
+            entry.grab_focus();
+    });
 
     const refreshId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
         refreshState();
@@ -3052,6 +3712,8 @@ export function openWindow(application, services) {
             GLib.source_remove(splitDragEnd);
         if (widthSave)
             GLib.source_remove(widthSave);
+        if (applyWidthTimer)
+            GLib.source_remove(applyWidthTimer);
         const liveWidth = window.get_width();
         if (liveWidth > 1) {
             if (contextOpen)

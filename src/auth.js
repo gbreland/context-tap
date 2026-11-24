@@ -41,7 +41,7 @@ const SUCCESS_PAGE = `<!DOCTYPE html>
 </head>
 <body>
 <main>
-  <h1>Signed in</h1>
+  <h1>Login received</h1>
   <p>You can close this window and return to Context Tap.</p>
 </main>
 </body>
@@ -137,6 +137,11 @@ function messageItem(row) {
 
 function httpError(text, status) {
     const error = new Error(text || `HTTP ${status}`);
+    error.status = status;
+    if (status === 502 || status === 503 || status === 504) {
+        error.message = 'ChatGPT did not answer. Try sign-in again.';
+        return error;
+    }
     try {
         const item = JSON.parse(text).error ?? {};
         error.apiType = item.type ?? '';
@@ -149,6 +154,30 @@ function httpError(text, status) {
         /* Keep the raw response when it is not JSON. */
     }
     return error;
+}
+
+function pause(ms) {
+    return new Promise(resolve => {
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+            resolve();
+            return GLib.SOURCE_REMOVE;
+        });
+    });
+}
+
+async function sendRetry(session, method, uri, body, contentType, token) {
+    let last;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            return await sendBytes(session, method, uri, body, contentType, token);
+        } catch (error) {
+            last = error;
+            if (![502, 503, 504].includes(error.status) || attempt === 2)
+                throw error;
+            await pause(400 * (attempt + 1));
+        }
+    }
+    throw last;
 }
 
 function sendBytes(session, method, uri, body, contentType, token) {
@@ -179,9 +208,9 @@ function sendBytes(session, method, uri, body, contentType, token) {
 }
 
 async function jwks(session) {
-    const config = JSON.parse(await sendBytes(
+    const config = JSON.parse(await sendRetry(
         session, 'GET', 'https://auth.openai.com/.well-known/openid-configuration', null, null, null));
-    return JSON.parse(await sendBytes(session, 'GET', config.jwks_uri, null, null, null));
+    return JSON.parse(await sendRetry(session, 'GET', config.jwks_uri, null, null, null));
 }
 
 function listenForCode() {
@@ -377,7 +406,7 @@ export class ChatGpt {
         if (callback.state !== state)
             throw new Error('ChatGPT login state did not match.');
         const exchangeId = callback.clientId || clientId;
-        const tokenText = await sendBytes(this.session, 'POST', TOKEN_URL, formBody({
+        const tokenText = await sendRetry(this.session, 'POST', TOKEN_URL, formBody({
             grant_type: 'authorization_code',
             client_id: exchangeId,
             code: callback.code,
@@ -490,17 +519,47 @@ export class ChatGpt {
             .filter(row => row.slug);
     }
 
-    async streamReply({model, instructions, input, onDelta}) {
-        const message = Soup.Message.new('POST', 'https://api.openai.com/v1/responses');
-        message.request_headers.append('Authorization', `Bearer ${await this.accessToken()}`);
-        message.request_headers.append('Accept', 'text/event-stream');
-        message.set_request_body_from_bytes('application/json', GLib.Bytes.new(new TextEncoder().encode(JSON.stringify({
+    async streamReply({model, instructions, input, cacheKey, onDelta}) {
+        const body = {
             model,
-            instructions,
             input,
             store: false,
             stream: true,
-        }))));
+        };
+        if (instructions)
+            body.instructions = instructions;
+        if (cacheKey)
+            body.prompt_cache_key = cacheKey;
+        const urls = this.replyUrl
+            ? [this.replyUrl]
+            : ['https://chatgpt.com/backend-api/codex/responses', 'https://api.openai.com/v1/responses'];
+        let lastError = null;
+        for (const url of urls) {
+            try {
+                const result = await this.postReply(url, body, cacheKey, onDelta);
+                this.replyUrl = url;
+                return result;
+            } catch (error) {
+                lastError = error;
+                const status = Number(error?.status);
+                const wrongRoute = !Number.isFinite(status)
+                    || status === 400 || status === 401 || status === 403
+                    || status === 404 || status === 405;
+                if (!wrongRoute || url === urls[urls.length - 1])
+                    throw error;
+            }
+        }
+        throw lastError;
+    }
+
+    async postReply(url, body, cacheKey, onDelta) {
+        const message = Soup.Message.new('POST', url);
+        message.request_headers.append('Authorization', `Bearer ${await this.accessToken()}`);
+        message.request_headers.append('Accept', 'text/event-stream');
+        message.request_headers.append('originator', 'context-tap');
+        if (cacheKey)
+            message.request_headers.append('session-id', cacheKey);
+        message.set_request_body_from_bytes('application/json', GLib.Bytes.new(new TextEncoder().encode(JSON.stringify(body))));
         const stream = await new Promise((resolve, reject) => {
             this.session.send_async(message, GLib.PRIORITY_DEFAULT, null, (src, res) => {
                 try {
@@ -570,10 +629,25 @@ function usageFrom(raw) {
     const inTokens = Number.isFinite(input) ? input : 0;
     const outTokens = Number.isFinite(output) ? output : 0;
     const total = Number(raw.total_tokens);
+    const details = raw.input_tokens_details;
+    let cached = null;
+    let cacheWrite = null;
+    if (details && typeof details === 'object') {
+        const read = Number(details.cached_tokens);
+        const parts = details.cache_write_tokens_details;
+        const fromParts = parts && typeof parts === 'object'
+            ? Number(parts.ttl_30m_tokens) + Number(parts.ttl_12h_tokens)
+            : NaN;
+        const write = Number(details.cache_write_tokens ?? raw.cache_write_tokens);
+        cached = Number.isFinite(read) ? read : 0;
+        cacheWrite = Number.isFinite(write) ? write : (Number.isFinite(fromParts) ? fromParts : 0);
+    }
     return {
         input: inTokens,
         output: outTokens,
         total: Number.isFinite(total) ? total : inTokens + outTokens,
+        cached,
+        cacheWrite,
     };
 }
 

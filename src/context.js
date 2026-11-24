@@ -36,7 +36,7 @@ export function loadAllow() {
 export function allowFrom(data) {
     const source = data ?? {};
     return {
-        host: normalize(source.host),
+        host: source.host === 'deny' ? 'deny' : 'allow',
         packages: normalize(source.packages),
         graphics: source.graphics === 'deny' ? 'deny' : source.graphics === 'ask' ? 'ask' : 'allow',
         terminal: normalizeMap(source.terminal),

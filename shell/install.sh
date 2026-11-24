@@ -98,8 +98,11 @@ extra = [part for part in sections if part.startswith('[') and part.split(']', 1
 updated = current.replace('Directories=' + ','.join(have), 'Directories=' + ','.join(have + missing), 1)
 (dest / 'index.theme').write_text(updated.rstrip() + '\n\n' + '\n\n'.join(extra) + '\n')
 PY
-if [ "$mode" != system ] && command -v gtk-update-icon-cache >/dev/null; then
+if command -v gtk-update-icon-cache >/dev/null; then
   gtk-update-icon-cache -f "$icons" >/dev/null || true
+fi
+if [ "$mode" = system ] && command -v update-desktop-database >/dev/null; then
+  update-desktop-database "$apps" >/dev/null || true
 fi
 
 write_entry() {

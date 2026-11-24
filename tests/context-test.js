@@ -21,6 +21,12 @@ if (decision(allow, 'screenshot', 'org.gnome.Firefox') !== 'ask')
 const loaded = allowFrom({host: 'allow', packages: 'deny'});
 if (loaded.graphics !== 'allow')
     throw new Error('graphics defaults to allow');
+if (allowFrom(null).host !== 'allow')
+    throw new Error('host defaults to allow');
+if (allowFrom({host: 'ask'}).host !== 'allow')
+    throw new Error('host ask becomes allow');
+if (allowFrom({host: 'deny'}).host !== 'deny')
+    throw new Error('host deny failed');
 if (allowFrom({graphics: 'deny'}).graphics !== 'deny')
     throw new Error('graphics deny failed');
 const gpu = {text: 'VGA NVIDIA', ok: true};

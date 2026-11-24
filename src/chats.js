@@ -33,10 +33,18 @@ function turnRow(turn) {
     };
     const input = tokenCount(turn?.inputTokens);
     const output = tokenCount(turn?.outputTokens);
+    const cached = tokenCount(turn?.cachedTokens);
+    const cacheWrite = tokenCount(turn?.cacheWriteTokens);
     if (input != null)
         row.inputTokens = input;
     if (output != null)
         row.outputTokens = output;
+    if (cached != null)
+        row.cachedTokens = cached;
+    if (cacheWrite != null)
+        row.cacheWriteTokens = cacheWrite;
+    if (typeof turn?.sentText === 'string' && turn.sentText)
+        row.sentText = turn.sentText;
     return row;
 }
 
@@ -101,6 +109,9 @@ export function turnsFrom(messages) {
             elapsedMs: assistant.elapsedMs,
             inputTokens: user.inputTokens,
             outputTokens: assistant.outputTokens,
+            cachedTokens: user.cachedTokens,
+            cacheWriteTokens: user.cacheWriteTokens,
+            sentText: user.sentText,
         }));
     }
     return turns;
@@ -118,6 +129,14 @@ export function zipMessages(items, turns) {
             const input = tokenCount(turns?.[turn]?.inputTokens);
             if (input != null)
                 message.inputTokens = input;
+            const cached = tokenCount(turns?.[turn]?.cachedTokens);
+            if (cached != null)
+                message.cachedTokens = cached;
+            const cacheWrite = tokenCount(turns?.[turn]?.cacheWriteTokens);
+            if (cacheWrite != null)
+                message.cacheWriteTokens = cacheWrite;
+            if (typeof turns?.[turn]?.sentText === 'string' && turns[turn].sentText)
+                message.sentText = turns[turn].sentText;
             messages.push(message);
         } else if (item?.role === 'assistant') {
             const elapsed = Number(turns?.[turn]?.elapsedMs);

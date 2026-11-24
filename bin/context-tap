@@ -5,7 +5,10 @@ root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 if [ "${1:-}" = "--autostart" ]; then
   shift
   uuid=context-tap@context-tap
-  [ "$(gsettings get org.gnome.shell disable-user-extensions 2>/dev/null)" = "true" ] && exit 0
+  user_ext="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/$uuid"
+  if [ -e "$user_ext" ] && [ "$(gsettings get org.gnome.shell disable-user-extensions 2>/dev/null)" = "true" ]; then
+    exit 0
+  fi
   case "$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null)" in
     *"'$uuid'"*) ;;
     *) exit 0 ;;

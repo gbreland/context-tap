@@ -10,6 +10,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const ASSISTANT = 'org.contexttap.ContextTap';
+const DESKTOP_ID = 'org.gnome.Desktop';
 const LAUNCH_HEIGHT = 760;
 const BUS_NAME = 'org.contexttap.ContextTap.Shell';
 const OBJECT_PATH = '/org/contexttap/ContextTap/Shell';
@@ -112,8 +113,43 @@ function loadPlacement() {
         const data = JSON.parse(new TextDecoder().decode(bytes));
         return {mode: placementMode(data.mode), above: data.above === true};
     } catch {
-        return {mode: 'off', above: false};
+        return {mode: 'left', above: true};
     }
+}
+
+function deleteTree(file) {
+    try {
+        const children = file.enumerate_children(
+            'standard::name,standard::type',
+            Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS,
+            null);
+        while (true) {
+            const info = children.next_file(null);
+            if (!info)
+                break;
+            const child = file.get_child(info.get_name());
+            if (info.get_file_type() === Gio.FileType.DIRECTORY)
+                deleteTree(child);
+            else
+                child.delete(null);
+        }
+        children.close(null);
+    } catch {
+        /* The directory is already gone. */
+    }
+    try {
+        file.delete(null);
+    } catch {
+        /* The directory is already gone. */
+    }
+}
+
+function deleteSavedData() {
+    for (const root of [
+        GLib.build_filenamev([GLib.get_user_state_dir(), 'context-tap']),
+        GLib.build_filenamev([GLib.get_user_data_dir(), 'context-tap']),
+    ])
+        deleteTree(Gio.File.new_for_path(root));
 }
 
 function savePlacement(mode, above) {
@@ -156,8 +192,12 @@ export default class GnomeAiAssistantExtension extends Extension {
             connection => this._export(connection),
             null,
             null);
+        this._appCloses = new Map();
+        for (const actor of global.get_window_actors())
+            this._watchAppClose(actor.meta_window);
         this._focusId = global.display.connect('notify::focus-window', () => this._onFocus());
         this._createdId = global.display.connect('window-created', (_display, win) => {
+            this._watchAppClose(win);
             if (this._isAssistant(win))
                 this._schedulePlacement();
             this._armFirstFrame(win);
@@ -167,6 +207,16 @@ export default class GnomeAiAssistantExtension extends Extension {
                 this._releaseIfMoved(win, true);
         });
         this._schedulePlacement();
+        this._overviewId = Main.overview.connect('hidden', () => {
+            if (this._hasRealApp())
+                return;
+            this._desktopReady = true;
+            this._shots.delete(DESKTOP_ID);
+            this._desktopShotBusy = false;
+            this._desktopShotAt = 0;
+            this._refreshDesktopShot(() => this._emitDesktop());
+        });
+        this._armDesktopCapture();
         if (!Main.layoutManager._startingUp)
             this._launchAssistant();
     }
@@ -202,6 +252,28 @@ export default class GnomeAiAssistantExtension extends Extension {
                 }
             }
             this._frameIds.clear();
+        }
+        if (this._appCloses) {
+            for (const [win, id] of this._appCloses) {
+                try {
+                    win.disconnect(id);
+                } catch {
+                    /* The window is already gone. */
+                }
+            }
+            this._appCloses.clear();
+        }
+        if (this._overviewId) {
+            Main.overview.disconnect(this._overviewId);
+            this._overviewId = 0;
+        }
+        if (this._desktopShotTimer) {
+            GLib.source_remove(this._desktopShotTimer);
+            this._desktopShotTimer = 0;
+        }
+        if (this._desktopReadyId) {
+            GLib.source_remove(this._desktopReadyId);
+            this._desktopReadyId = 0;
         }
         if (this._focusId)
             global.display.disconnect(this._focusId);
@@ -242,6 +314,51 @@ export default class GnomeAiAssistantExtension extends Extension {
         this._nameId = 0;
         this._shots = null;
         this._connection = null;
+        if (this._userTurnedOff())
+            this._forgetSavedData();
+    }
+
+    _userTurnedOff() {
+        try {
+            const settings = new Gio.Settings({schema: 'org.gnome.shell'});
+            return settings.get_strv('disabled-extensions').includes(this.uuid);
+        } catch {
+            return false;
+        }
+    }
+
+    _forgetSavedData() {
+        try {
+            const time = global.get_current_time();
+            for (const win of this._assistantWindows())
+                win.delete(time);
+        } catch (error) {
+            console.error(`Context Tap could not close the app: ${error}`);
+        }
+        let tries = 0;
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+            tries += 1;
+            let owned = false;
+            try {
+                const [has] = Gio.DBus.session.call_sync(
+                    'org.freedesktop.DBus',
+                    '/org/freedesktop/DBus',
+                    'org.freedesktop.DBus',
+                    'NameHasOwner',
+                    new GLib.Variant('(s)', [ASSISTANT]),
+                    new GLib.VariantType('(b)'),
+                    Gio.DBusCallFlags.NONE,
+                    -1,
+                    null).deepUnpack();
+                owned = has;
+            } catch {
+                owned = false;
+            }
+            if (owned && tries < 15)
+                return GLib.SOURCE_CONTINUE;
+            deleteSavedData();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _export(connection) {
@@ -343,7 +460,7 @@ export default class GnomeAiAssistantExtension extends Extension {
         const rows = new Map();
         for (const win of this._windows()) {
             const info = this._describe(win);
-            if (!info.appId)
+            if (!info.appId || this._isDesktopWindow(win))
                 continue;
             const focused = win === global.display.focus_window;
             const pid = this._windowPid(win);
@@ -366,7 +483,33 @@ export default class GnomeAiAssistantExtension extends Extension {
             if (pid)
                 previous[4] = pid;
         }
+        rows.set(DESKTOP_ID, [DESKTOP_ID, 'Desktop', 'Desktop', this._desktopFocused(), 0]);
         return [...rows.values()];
+    }
+
+    _isDesktopWindow(win) {
+        if (!win)
+            return false;
+        try {
+            return win.get_window_type() === Meta.WindowType.DESKTOP;
+        } catch {
+            return false;
+        }
+    }
+
+    _desktopFocused() {
+        const win = global.display.focus_window;
+        return !win || this._isDesktopWindow(win);
+    }
+
+    _desktopInfo() {
+        return {appId: DESKTOP_ID, name: 'Desktop', title: 'Desktop'};
+    }
+
+    _contextInfo(win) {
+        if (!win || this._isDesktopWindow(win) || !this._describe(win).appId)
+            return this._desktopInfo();
+        return this._describe(win);
     }
 
     _windows() {
@@ -431,18 +574,128 @@ export default class GnomeAiAssistantExtension extends Extension {
         };
     }
 
+    _hasRealApp() {
+        return this._windows().some(win => {
+            if (this._isDesktopWindow(win))
+                return false;
+            const id = this._describe(win).appId;
+            return Boolean(id) && id !== ASSISTANT;
+        });
+    }
+
+    _watchAppClose(win) {
+        if (!win || this._appCloses?.has(win))
+            return;
+        let id = 0;
+        try {
+            id = win.connect('unmanaged', () => {
+                this._appCloses?.delete(win);
+                if (this._hasRealApp())
+                    return;
+                this._scheduleDesktopShot();
+                this._emitDesktop();
+            });
+        } catch {
+            return;
+        }
+        this._appCloses?.set(win, id);
+    }
+
+    _armDesktopCapture() {
+        this._desktopReady = false;
+        if (this._desktopReadyId)
+            GLib.source_remove(this._desktopReadyId);
+        this._desktopReadyId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
+            this._desktopReadyId = 0;
+            this._desktopReady = true;
+            if (!this._hasRealApp())
+                this._refreshDesktopShot(() => this._emitDesktop());
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _noteDesktopShot() {
+        this._desktopShotBusy = false;
+        this._desktopShotAt = GLib.get_monotonic_time();
+    }
+
+    _ensureDesktopShot() {
+        if (this._shots.get(DESKTOP_ID)?.png?.length || this._desktopShotBusy)
+            return;
+        this._desktopShotBusy = true;
+        this._captureDesktop(() => this._noteDesktopShot());
+    }
+
+    _refreshDesktopShot(done) {
+        if (this._desktopShotBusy) {
+            done?.();
+            return;
+        }
+        this._desktopShotBusy = true;
+        this._captureDesktop(() => {
+            this._noteDesktopShot();
+            done?.();
+        });
+    }
+
+    _scheduleDesktopShot() {
+        if (this._desktopShotTimer)
+            return;
+        this._desktopShotTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
+            this._desktopShotTimer = 0;
+            if (this._hasRealApp())
+                return GLib.SOURCE_REMOVE;
+            this._desktopShotAt = 0;
+            this._refreshDesktopShot(() => this._emitDesktop());
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _emitDesktop() {
+        if (!this._connection)
+            return;
+        const prevInfo = this._contextInfo(this._current);
+        this._connection.emit_signal(
+            null,
+            OBJECT_PATH,
+            IFACE,
+            'FocusChanged',
+            new GLib.Variant('(sss)', [
+                DESKTOP_ID,
+                'Desktop',
+                prevInfo.appId === DESKTOP_ID ? '' : prevInfo.appId,
+            ]));
+    }
+
     _onFocus() {
         const next = global.display.focus_window;
         const prev = this._current;
         this._current = next;
-        const nextId = this._describe(next).appId;
-        const target = nextId === ASSISTANT ? prev : next;
-        const finish = () => this._emitFocus(next, prev);
-        if (!target) {
-            finish();
+        if (!this._hasRealApp()) {
+            if (this._isAssistant(next)) {
+                if (this._desktopShotTimer) {
+                    GLib.source_remove(this._desktopShotTimer);
+                    this._desktopShotTimer = 0;
+                }
+                this._emitDesktop();
+                return;
+            }
+            if (!this._desktopShotBusy)
+                this._scheduleDesktopShot();
+            this._emitDesktop();
             return;
         }
-        this._captureAfterRaise(target, finish);
+        const nextId = this._describe(next).appId;
+        if (nextId === ASSISTANT) {
+            this._emitFocus(next, prev);
+            return;
+        }
+        const finish = () => this._emitFocus(next, prev);
+        if (!next || this._isDesktopWindow(next)) {
+            this._captureDesktop(finish);
+            return;
+        }
+        this._captureAfterRaise(next, finish);
     }
 
     _overlaps(a, b) {
@@ -504,6 +757,8 @@ export default class GnomeAiAssistantExtension extends Extension {
                     /* Already disconnected. */
                 }
                 this._framed.add(actor);
+                if (this._isAssistant(metaWindow))
+                    this._schedulePlacement();
                 if (this._raiseCapture?.window === metaWindow)
                     this._raiseCapture.consider();
             });
@@ -605,8 +860,8 @@ export default class GnomeAiAssistantExtension extends Extension {
     }
 
     _emitFocus(next, prev) {
-        const nextInfo = this._describe(next);
-        const prevInfo = this._describe(prev);
+        const nextInfo = this._contextInfo(next);
+        const prevInfo = this._contextInfo(prev);
         if (!this._connection)
             return;
         this._connection.emit_signal(
@@ -633,7 +888,10 @@ export default class GnomeAiAssistantExtension extends Extension {
     }
 
     _captureVariant(appId, refresh) {
-        if (refresh) {
+        if (appId === DESKTOP_ID) {
+            if (refresh)
+                this._ensureDesktopShot();
+        } else if (refresh) {
             const win = this._windows().find(item => this._describe(item).appId === appId);
             if (win) {
                 const png = this._png(win);
@@ -725,8 +983,88 @@ export default class GnomeAiAssistantExtension extends Extension {
         }
     }
 
+    _desktopRect() {
+        let monitor = 0;
+        try {
+            monitor = global.display.get_current_monitor();
+        } catch {
+            monitor = 0;
+        }
+        try {
+            const workspace = global.workspace_manager.get_active_workspace();
+            const area = workspace?.get_work_area_for_monitor?.(monitor);
+            if (area && area.width > 1 && area.height > 1)
+                return area;
+        } catch {
+            /* Use the full monitor. */
+        }
+        try {
+            return global.display.get_monitor_geometry(monitor);
+        } catch {
+            return null;
+        }
+    }
+
+    _keepDesktop(png) {
+        if (!png?.length)
+            return;
+        this._shots.set(DESKTOP_ID, {
+            png,
+            title: 'Desktop',
+            timestamp: Date.now() * 1000,
+        });
+    }
+
+    _captureDesktop(done, attempt = 0) {
+        this._shotEpoch = (this._shotEpoch || 0) + 1;
+        const epoch = this._shotEpoch;
+        this._cancelRaiseCapture();
+        const finish = () => done?.();
+        if ((this._holding || this._placing) && attempt < 10) {
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+                if (epoch === this._shotEpoch)
+                    this._captureDesktop(done, attempt + 1);
+                return GLib.SOURCE_REMOVE;
+            });
+            return;
+        }
+        const rect = this._desktopRect();
+        if (!rect || rect.width < 1 || rect.height < 1) {
+            finish();
+            return;
+        }
+        // paint_to_buffer omits the wallpaper. The desktop logo still has pixels,
+        // so that buffer looks used and hides the real screen shot.
+        const stream = Gio.MemoryOutputStream.new_resizable();
+        const shot = new Shell.Screenshot();
+        try {
+            shot.screenshot_area(
+                rect.x, rect.y, rect.width, rect.height, stream, (obj, result) => {
+                    try {
+                        obj.screenshot_area_finish(result);
+                        if (epoch === this._shotEpoch) {
+                            stream.close(null);
+                            const png = stream.steal_as_bytes()?.toArray?.() ?? null;
+                            if (png?.length)
+                                this._keepDesktop(png);
+                        }
+                    } catch (error) {
+                        console.error(`Context Tap desktop capture failed: ${error}`);
+                    }
+                    finish();
+                });
+        } catch (error) {
+            console.error(`Context Tap desktop capture failed: ${error}`);
+            finish();
+        }
+    }
+
     _pngStage(metaWindow) {
         const rect = metaWindow.get_frame_rect();
+        return this._pngRect(rect);
+    }
+
+    _pngRect(rect) {
         if (!rect || rect.width < 1 || rect.height < 1)
             return null;
         const {width, height, scale} = this._captureSize(rect);
@@ -812,14 +1150,14 @@ export default class GnomeAiAssistantExtension extends Extension {
         try {
             shot.screenshot_area(
                 rect.x, rect.y, rect.width, rect.height, stream, (obj, result) => {
-                    if (epoch !== this._shotEpoch)
-                        return;
                     try {
                         obj.screenshot_area_finish(result);
-                        stream.close(null);
-                        const png = stream.steal_as_bytes()?.toArray?.() ?? null;
-                        if (png?.length)
-                            this._keep(metaWindow, png);
+                        if (epoch === this._shotEpoch) {
+                            stream.close(null);
+                            const png = stream.steal_as_bytes()?.toArray?.() ?? null;
+                            if (png?.length)
+                                this._keep(metaWindow, png);
+                        }
                     } catch (error) {
                         console.error(`Context Tap area capture failed: ${error}`);
                     }
