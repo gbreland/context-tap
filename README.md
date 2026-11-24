@@ -3,7 +3,43 @@ Context Tap is currently a Gnome only extension that enables a a side-panel AI a
 by sending prompts and various other contextual information to an AI agent while being in full control of what is sent.  The UI provides
 frictionless sharing of system information, app specific data and screenshots of the app with each prompt.
 
+## Screenshots
 
+The panel is persistent on the desktop as a panel taking up some amount of desktop space for windows. It receives different context information from different apps.  For most apps this will just be automatically capturing screenshots of the app before you send a prompt to your AI. For terminal apps there is native integration protocols but it also supports tmux for reading and sending commands to any terminal application as shown here. You are in control of what context is sent to AI per application. You could use it just like any AI window and copy/paste your context in manually if you turn off all context.  The power of the app is removing the friction of the copy/paste work to inform AI of the result of what you're doing.
+
+<img src="data/images/Context Tap Full Desktop Hero.png" alt="Context Tap docked beside a terminal and a calculator" width="1030">
+
+---
+
+The same panel, on its own. The header names the app and how old its data is. The line under Chat is the whole conversation: input tokens, output tokens, and how much of the input was cached. The reply includes a command you can run. Under the prompt, the terminal text and the screenshot are separate items. Each has its own check mark.
+
+<img src="data/images/Context Tap Hero.png" alt="The Context Tap panel with a chat, a command, and the terminal context" width="231">
+
+---
+
+The gear opens the list of what a prompt can include. Each row shows the size. A checked row is sent. An unchecked row stays on the machine. Copy on a row puts that text on the clipboard.
+
+<img src="data/images/Context Tap Context Details.png" alt="Context rows with sizes and include checks" width="400">
+
+---
+
+When the reply has commands, each group gets a Run button. Run All runs every group in the block. The commands stay visible, so you read them before they run.
+
+<img src="data/images/Context Tap Run Commands.png" alt="Two command groups with Run and Run All" width="400">
+
+---
+
+The percent on a prompt opens that turn. It shows input, cached, uncached, output, and how long the reply took. A green check means 80% or more of that prompt's input was cached.
+
+<img src="data/images/Context Tap Prompt Stats.png" alt="Per-prompt cache details" width="400">
+
+---
+
+The chart next to the chat totals opens the session. One bar is the whole chat. The rows under it are the prompts, oldest first, each with its own cached share. Later prompts reuse more of the earlier input.
+
+<img src="data/images/Context Tap Session Stats.png" alt="Session cache totals and one bar per prompt" width="340">
+
+---
 
 ## Install
 
