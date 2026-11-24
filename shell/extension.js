@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Greg Breland
+
 import Clutter from 'gi://Clutter';
 import Cogl from 'gi://Cogl';
 import GdkPixbuf from 'gi://GdkPixbuf';
@@ -184,11 +187,11 @@ export default class GnomeAiAssistantExtension extends Extension {
         this._framePending = new Set();
         for (const actor of global.get_window_actors())
             this._framed.add(actor);
-        console.error('Context Tap extension ready');
+        this._laterIds = new Set();
         this._nameId = Gio.bus_own_name(
             Gio.BusType.SESSION,
             BUS_NAME,
-            Gio.BusNameOwnerFlags.ALLOW_REPLACEMENT | Gio.BusNameOwnerFlags.REPLACE,
+            Gio.BusNameOwnerFlags.NONE,
             connection => this._export(connection),
             null,
             null);
@@ -241,7 +244,35 @@ export default class GnomeAiAssistantExtension extends Extension {
         }
     }
 
+    _later(fn, ms, idle = false) {
+        if (!this._laterIds)
+            this._laterIds = new Set();
+        const id = idle
+            ? GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => this._ranLater(id, fn))
+            : GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => this._ranLater(id, fn));
+        this._laterIds.add(id);
+        return id;
+    }
+
+    _ranLater(id, fn) {
+        const again = fn();
+        if (again === GLib.SOURCE_CONTINUE)
+            return GLib.SOURCE_CONTINUE;
+        this._laterIds?.delete(id);
+        return GLib.SOURCE_REMOVE;
+    }
+
+    _clearLater() {
+        const ids = this._laterIds;
+        this._laterIds = new Set();
+        if (!ids)
+            return;
+        for (const id of ids)
+            GLib.source_remove(id);
+    }
+
     disable() {
+        this._clearLater();
         this._cancelRaiseCapture();
         if (this._frameIds) {
             for (const [actor, id] of this._frameIds) {
@@ -335,30 +366,7 @@ export default class GnomeAiAssistantExtension extends Extension {
         } catch (error) {
             console.error(`Context Tap could not close the app: ${error}`);
         }
-        let tries = 0;
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
-            tries += 1;
-            let owned = false;
-            try {
-                const [has] = Gio.DBus.session.call_sync(
-                    'org.freedesktop.DBus',
-                    '/org/freedesktop/DBus',
-                    'org.freedesktop.DBus',
-                    'NameHasOwner',
-                    new GLib.Variant('(s)', [ASSISTANT]),
-                    new GLib.VariantType('(b)'),
-                    Gio.DBusCallFlags.NONE,
-                    -1,
-                    null).deepUnpack();
-                owned = has;
-            } catch {
-                owned = false;
-            }
-            if (owned && tries < 15)
-                return GLib.SOURCE_CONTINUE;
-            deleteSavedData();
-            return GLib.SOURCE_REMOVE;
-        });
+        deleteSavedData();
     }
 
     _export(connection) {
@@ -737,11 +745,11 @@ export default class GnomeAiAssistantExtension extends Extension {
             if (this._framePending.has(metaWindow))
                 return;
             this._framePending.add(metaWindow);
-            GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._later(() => {
                 this._framePending.delete(metaWindow);
                 this._armFirstFrame(metaWindow);
                 return GLib.SOURCE_REMOVE;
-            });
+            }, 0, true);
             return;
         }
         if (this._framed.has(actor) || this._frameIds.has(actor))
@@ -1021,11 +1029,11 @@ export default class GnomeAiAssistantExtension extends Extension {
         this._cancelRaiseCapture();
         const finish = () => done?.();
         if ((this._holding || this._placing) && attempt < 10) {
-            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+            this._later(() => {
                 if (epoch === this._shotEpoch)
                     this._captureDesktop(done, attempt + 1);
                 return GLib.SOURCE_REMOVE;
-            });
+            }, 200);
             return;
         }
         const rect = this._desktopRect();
@@ -1135,10 +1143,10 @@ export default class GnomeAiAssistantExtension extends Extension {
             return;
         const rect = metaWindow.get_frame_rect?.();
         if ((this._holding || this._placing) && attempt < 10) {
-            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+            this._later(() => {
                 this._pngAsync(metaWindow, done, epoch, attempt + 1);
                 return GLib.SOURCE_REMOVE;
-            });
+            }, 200);
             return;
         }
         if (!rect || rect.width < 1 || rect.height < 1) {

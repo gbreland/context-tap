@@ -1,41 +1,47 @@
 ## Context Tap
-Context Tap is currently a Gnome only extension that enables a a side-panel AI assistant.  It helps you with any task you are working on
-by sending prompts and various other contextual information to an AI agent while being in full control of what is sent.  The UI provides
-frictionless sharing of system information, app specific data and screenshots of the app with each prompt.
+Context Tap is a Gnome side-panel AI assistant extension.  It helps with any task in any appliccation by providing AI prompts with more context
+of the state of the app you are working with. You are always in control of what context is sent.  The UI just reduces the friction of sharing system context, app specific data and screenshots with each prompt.
+
+This app is currently more of a demo and only supports login with ChatGPT but if it proves useful, the future plans for improvement are:
+
+* Add more AI agents via CLI integration
+* Multiple screenshots instead of just the last one
+* Live response mode where a cheap AI model watches and decides when your main model might want to provide feedback
+* Multi-step mode where the model provides a series of steps and the app walks you through them one step at a time with AI feedback when needed.
 
 ## Screenshots
 
-The panel is persistent on the desktop as a panel taking up some amount of desktop space for windows. It receives different context information from different apps.  For most apps this will just be automatically capturing screenshots of the app before you send a prompt to your AI. For terminal apps there is native integration protocols but it also supports tmux for reading and sending commands to any terminal application as shown here. You are in control of what context is sent to AI per application. You could use it just like any AI window and copy/paste your context in manually if you turn off all context.  The power of the app is removing the friction of the copy/paste work to inform AI of the result of what you're doing.
+The panel is persistent on the desktop as a panel taking up some amount of desktop space for windows. It receives different context information from different apps.  For most apps this will just be automatically capturing screenshots of the app before you send a prompt to your AI. For terminal apps there is native integration protocols but it also supports tmux for reading and sending commands to any terminal application as shown here.  The power of the app is removing the friction of the copy/paste work to inform AI of the result of what you're doing.
 
 <img src="data/images/Context Tap Full Desktop Hero.png" alt="Context Tap docked beside a terminal and a calculator" width="1030">
 
 ---
 
-The same panel, on its own. The header names the app and how old its data is. The line under Chat is the whole conversation: input tokens, output tokens, and how much of the input was cached. The reply includes a command you can run. Under the prompt, the terminal text and the screenshot are separate items. Each has its own check mark.
-
-<img src="data/images/Context Tap Hero.png" alt="The Context Tap panel with a chat, a command, and the terminal context" width="231">
-
----
-
-The gear opens the list of what a prompt can include. Each row shows the size. A checked row is sent. An unchecked row stays on the machine. Copy on a row puts that text on the clipboard.
-
-<img src="data/images/Context Tap Context Details.png" alt="Context rows with sizes and include checks" width="400">
-
----
-
-When the reply has commands, each group gets a Run button. Run All runs every group in the block. The commands stay visible, so you read them before they run.
+When the app in context is a temrinal app with native or tmux integration enabled and the ai response has commands, each group gets a Run button per command. If there are multiple commands, a Run All button will run all commands in the block. 
 
 <img src="data/images/Context Tap Run Commands.png" alt="Two command groups with Run and Run All" width="400">
 
 ---
 
-The percent on a prompt opens that turn. It shows input, cached, uncached, output, and how long the reply took. A green check means 80% or more of that prompt's input was cached.
+The full side panel in detail. The header names the app in context and how long ago it sent data. You can choose the model that is best for what you are doing but right now only ChatGPT is supported. The Chat dropdown is for loading old chats or starting new ones.  Currently saving chats is no supported for security reasons and Login with Chat GPT doesn't support saving/loading chats in the cloud. Right below the chat drop down are statistics about this chat session and clicking on the graph icon will show even more detail. Below the session stats is the prompt history. Ai can suggest commands you might want to run and the app will present them as easy to click on run commands as long as you have a native or tmux terminal in context as the currently focused application. Toward the bottom, the "Ask AI something" is the AI input prompt common to all AI chat UIs.  Below the prompt input is where you tell the app what additional context you want to send. Most of the content options you will set once and leave which can be set by clicking on the setting icon in the context area. It's common to want to send app data or a screen shot on a prompt-by-prompt basis so they remain persistant in the UI so you can easily click on them to turn sending data on/off.
+
+<img src="data/images/Context Tap Hero.png" alt="The Context Tap panel with a chat, a command, and the terminal context" width="231">
+
+---
+
+Clicking on the settings icon in the context area at the bottom opens a list of context data a prompt will include. Data and screenshots are easily turned on/off anytime but the additional data soruces listed here are ones that you set once and send every time. Turning these additional data souces on/off for each prompt will cause cache failure and increased token usage.  You can expand each one and see exactly what the app is sending.
+
+<img src="data/images/Context Tap Context Details.png" alt="Context rows with sizes and include checks" width="400">
+
+---
+
+Each prompt sent to AI records stats about token usage and time AI spent thinking.  Tapping on the chached percentage label opens up this detailed stats window so you can see exactly what went on.  Not all prompts can cache static system information but you want to see some caching so you know you are not using more tokens than you should be.
 
 <img src="data/images/Context Tap Prompt Stats.png" alt="Per-prompt cache details" width="400">
 
 ---
 
-The chart next to the chat totals opens the session. One bar is the whole chat. The rows under it are the prompts, oldest first, each with its own cached share. Later prompts reuse more of the earlier input.
+This is the details of all the tokens and prompts for the current chat session.  It is opened by clicking on the graph icon next to the session stats at the top of the app. 
 
 <img src="data/images/Context Tap Session Stats.png" alt="Session cache totals and one bar per prompt" width="340">
 
@@ -43,12 +49,14 @@ The chart next to the chat totals opens the session. One bar is the whole chat. 
 
 ## Install
 
-Context Tap has two parts: the app and a GNOME Shell extension. The extension docks the window, keeps it on top, and reads window focus. Run `shell/install.sh` in one of three modes.
+Context Tap has two parts: the app and a GNOME Shell extension. The extension docks the window, keeps it on top, and reads window focus. Run `shell/install.sh` in one of three modes based on how you want it installed.
+
+For most installations, just installing it for your user if fine so just run the install.sh script without paramaters.
 
 | Command | Extension location | App location | In the Extensions app |
 |---|---|---|---|
 | `shell/install.sh` | `~/.local/share/gnome-shell/extensions/` (copy) | `~/.local/lib/context-tap/` (copy) | On/off and Remove. Remove deletes only the copy. |
-| `shell/install.sh --dev` | Link to the repo `shell/` folder | Runs from the repo | On/off and Remove. **Remove deletes the repo files.** |
+| `shell/install.sh --dev` | Link to the repo `shell/` folder | Runs from the repo path | On/off and Remove. **Remove deletes the repo files. (BE CAREFUL)** |
 | `sudo shell/install.sh --system` | `/usr/share/gnome-shell/extensions/` | `/usr/share/context-tap/` | On/off only. No Remove. |
 
 ### User install (default)
@@ -60,7 +68,7 @@ shell/install.sh
 - Copies the extension and the app into your home folder.
 - Installs the app launcher, the D-Bus service file, and the autostart entry.
 - Turns the extension on for you.
-- Log out, then log in. GNOME loads the extension and starts Context Tap.
+- You MUST Log out and then log back in. GNOME loads the extension and starts Context Tap.
 
 ### Developer install
 
@@ -68,7 +76,7 @@ shell/install.sh
 shell/install.sh --dev
 ```
 
-- Links the extension to the repo, so your edits go live after the next login.
+- Links the extension to the repo, so your edits go live after the next login without deploying it.
 - The app runs from the repo.
 - **Do not use Remove in the Extensions app with this mode.** GNOME follows the link and deletes the files in the repo `shell/` folder. To turn the extension off, use the on/off switch.
 
@@ -91,8 +99,7 @@ sudo shell/install.sh --system
 
 - At login, Context Tap starts only when the extension is on for that user.
 - When you turn the extension on in Extensions, Context Tap starts if it is not already running.
-- When you turn the extension off, the app keeps running. It does not start at the next login.
-- Without the extension, the app opens at the default size. Screen bind and Always on Top are not available, because on Wayland an app cannot set its own position.
+- Turning the extension off and then back on will clear ALL settings for your user if you want to reset everything.
 
 ### Notes
 
