@@ -1,5 +1,5 @@
 ## Context Tap
-Context Tap is a Gnome side-panel AI assistant extension.  It helps with any task in any appliccation by providing AI prompts with more context
+Context Tap is a Gnome side-panel AI assistant extension.  It helps with any task in any application by providing AI prompts with more context
 of the state of the app you are working with. You are always in control of what context is sent.  The UI just reduces the friction of sharing system context, app specific data and screenshots with each prompt.
 
 This app is currently more of a demo and only supports login with ChatGPT but if it proves useful, the future plans for improvement are:
@@ -17,19 +17,19 @@ The panel is persistent on the desktop as a panel taking up some amount of deskt
 
 ---
 
-When the app in context is a temrinal app with native or tmux integration enabled and the ai response has commands, each group gets a Run button per command. If there are multiple commands, a Run All button will run all commands in the block. 
+When the app in context is a terminal app with native or tmux integration enabled and the ai response has commands, each group gets a Run button per command. If there are multiple commands, a Run All button will run all commands in the block. 
 
 <img src="data/images/Context Tap Run Commands.png" alt="Two command groups with Run and Run All" width="400">
 
 ---
 
-The full side panel in detail. The header names the app in context and how long ago it sent data. You can choose the model that is best for what you are doing but right now only ChatGPT is supported. The Chat dropdown is for loading old chats or starting new ones.  Currently saving chats is no supported for security reasons and Login with Chat GPT doesn't support saving/loading chats in the cloud. Right below the chat drop down are statistics about this chat session and clicking on the graph icon will show even more detail. Below the session stats is the prompt history. Ai can suggest commands you might want to run and the app will present them as easy to click on run commands as long as you have a native or tmux terminal in context as the currently focused application. Toward the bottom, the "Ask AI something" is the AI input prompt common to all AI chat UIs.  Below the prompt input is where you tell the app what additional context you want to send. Most of the content options you will set once and leave which can be set by clicking on the setting icon in the context area. It's common to want to send app data or a screen shot on a prompt-by-prompt basis so they remain persistant in the UI so you can easily click on them to turn sending data on/off.
+The full side panel in detail. The header names the app in context and how long ago it sent data. You can choose the model that is best for what you are doing but right now only ChatGPT is supported. The Chat drop-down is for loading old chats or starting new ones.  Currently saving chats is no supported for security reasons and Login with Chat GPT doesn't support saving/loading chats in the cloud. Right below the chat drop down are statistics about this chat session and clicking on the graph icon will show even more detail. Below the session stats is the prompt history. Ai can suggest commands you might want to run and the app will present them as easy to click on run commands as long as you have a native or tmux terminal in context as the currently focused application. Toward the bottom, the "Ask AI something" is the AI input prompt common to all AI chat UIs.  Below the prompt input is where you tell the app what additional context you want to send. Most of the content options you will set once and leave which can be set by clicking on the setting icon in the context area. It's common to want to send app data or a screen shot on a prompt-by-prompt basis so they remain persistent in the UI so you can easily click on them to turn sending data on/off.
 
 <img src="data/images/Context Tap Hero.png" alt="The Context Tap panel with a chat, a command, and the terminal context" width="231">
 
 ---
 
-Clicking on the settings icon in the context area at the bottom opens a list of context data a prompt will include. Data and screenshots are easily turned on/off anytime but the additional data soruces listed here are ones that you set once and send every time. Turning these additional data souces on/off for each prompt will cause cache failure and increased token usage.  You can expand each one and see exactly what the app is sending.
+Clicking on the settings icon in the context area at the bottom opens a list of context data a prompt will include. Data and screenshots are easily turned on/off anytime but the additional data sources listed here are ones that you set once and send every time. Turning these additional data souces on/off for each prompt will cause cache failure and increased token usage.  You can expand each one and see exactly what the app is sending.
 
 <img src="data/images/Context Tap Context Details.png" alt="Context rows with sizes and include checks" width="400">
 
@@ -51,7 +51,7 @@ This is the details of all the tokens and prompts for the current chat session. 
 
 Context Tap has two parts: the app and a GNOME Shell extension. The extension docks the window, keeps it on top, and reads window focus. Run `shell/install.sh` in one of three modes based on how you want it installed.
 
-For most installations, just installing it for your user if fine so just run the install.sh script without paramaters.
+For most installations, just installing it for your user if fine so just run the install.sh script without parameters.
 
 | Command | Extension location | App location | In the Extensions app |
 |---|---|---|---|
@@ -66,7 +66,7 @@ shell/install.sh
 ```
 
 - Copies the extension and the app into your home folder.
-- Installs the app launcher, the D-Bus service file, and the autostart entry.
+- Installs the app launcher, the D-Bus service file, and the auto-start entry.
 - Turns the extension on for you.
 - You MUST Log out and then log back in. GNOME loads the extension and starts Context Tap.
 
